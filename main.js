@@ -15,6 +15,7 @@ let mainWindow = null;
 let tray = null;
 let watchTimer = null;
 let scanning = false;
+let scanInProgress = false; // guards against overlapping scans (double-processing)
 
 // ---- Persistent config (in the OS user-data dir) --------------------------
 function configPath() {
@@ -106,62 +107,73 @@ function uniqueDest(dir, name) {
 }
 
 async function scanOnce() {
-  if (!config.watchDir || !config.ingestToken) return;
-  const dir = config.watchDir;
-  const processed = path.join(dir, "processed");
-  const failed = path.join(dir, "failed");
+  // Never let two scans run at once — that double-processes files (file races)
+  // and floods the backend with concurrent uploads.
+  if (scanInProgress || !config.watchDir || !config.ingestToken) return;
+  scanInProgress = true;
   try {
-    fs.mkdirSync(processed, { recursive: true });
-    fs.mkdirSync(failed, { recursive: true });
-  } catch {}
-
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return;
-  }
-
-  for (const name of entries) {
-    if (name.startsWith(".")) continue;
-    const full = path.join(dir, name);
-    let stat;
+    const dir = config.watchDir;
+    const processed = path.join(dir, "processed");
+    const failed = path.join(dir, "failed");
     try {
-      stat = fs.statSync(full);
+      fs.mkdirSync(processed, { recursive: true });
+      fs.mkdirSync(failed, { recursive: true });
+    } catch {}
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir);
     } catch {
-      continue;
+      return;
     }
-    if (!stat.isFile()) continue;
-    if (!SUPPORTED.includes(path.extname(name).toLowerCase())) continue;
 
-    // Wait for the file to finish arriving (size stable) — handles slow scans
-    // and OneDrive hydration.
-    const size1 = stat.size;
-    await new Promise((r) => setTimeout(r, 1000));
-    let size2;
-    try {
-      size2 = fs.statSync(full).size;
-    } catch {
-      continue;
-    }
-    if (size2 !== size1 || size2 === 0) continue;
-
-    log("Uploading " + name + " …");
-    try {
-      await uploadFile(full);
-      fs.renameSync(full, uniqueDest(processed, name));
-      stats.uploaded += 1;
-      stats.lastUpload = new Date().toLocaleString();
-      log("Uploaded " + name, "ok");
-    } catch (e) {
-      stats.failed += 1;
+    for (const name of entries) {
+      if (name.startsWith(".")) continue;
+      const full = path.join(dir, name);
+      let stat;
       try {
-        fs.renameSync(full, uniqueDest(failed, name));
-        fs.writeFileSync(path.join(failed, name + ".error.txt"), String(e.message || e));
-      } catch {}
-      log("Failed " + name + ": " + (e.message || e), "error");
+        stat = fs.statSync(full);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      if (!SUPPORTED.includes(path.extname(name).toLowerCase())) continue;
+
+      // Wait for the file to finish arriving (size stable) — handles slow scans
+      // and OneDrive hydration.
+      const size1 = stat.size;
+      await new Promise((r) => setTimeout(r, 1000));
+      let size2;
+      try {
+        size2 = fs.statSync(full).size;
+      } catch {
+        continue;
+      }
+      if (size2 !== size1 || size2 === 0) continue;
+      // Re-check the file still exists right before uploading.
+      if (!fs.existsSync(full)) continue;
+
+      log("Uploading " + name + " …");
+      try {
+        await uploadFile(full);
+        fs.renameSync(full, uniqueDest(processed, name));
+        stats.uploaded += 1;
+        stats.lastUpload = new Date().toLocaleString();
+        log("Uploaded " + name, "ok");
+      } catch (e) {
+        stats.failed += 1;
+        try {
+          if (fs.existsSync(full)) {
+            fs.renameSync(full, uniqueDest(failed, name));
+            fs.writeFileSync(path.join(failed, name + ".error.txt"), String(e.message || e));
+          }
+        } catch {}
+        log("Failed " + name + ": " + (e.message || e), "error");
+      }
+      pushState();
     }
-    pushState();
+  } finally {
+    scanInProgress = false;
   }
 }
 
@@ -175,16 +187,17 @@ function startWatching() {
     } catch (e) {
       log("Watcher error: " + (e.message || e), "error");
     }
+    // Schedule the NEXT scan only after this one fully finishes — no overlap.
+    if (scanning) watchTimer = setTimeout(loop, POLL_MS);
   };
   loop();
-  watchTimer = setInterval(loop, POLL_MS);
   pushState();
   updateTray();
 }
 
 function stopWatching() {
   scanning = false;
-  if (watchTimer) clearInterval(watchTimer);
+  if (watchTimer) clearTimeout(watchTimer);
   watchTimer = null;
   log("Stopped watching.");
   pushState();
