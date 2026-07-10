@@ -209,6 +209,15 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.webContents.on("did-finish-load", () => pushState());
+
+  // Closing the window hides it to the tray and keeps the uploader running in
+  // the background. Fully quit from the tray menu → Quit.
+  mainWindow.on("close", (e) => {
+    if (!app.isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
 }
 
 function updateTray() {
@@ -230,10 +239,13 @@ function updateTray() {
 function createTray() {
   try {
     const { nativeImage } = require("electron");
-    // 1x1 transparent fallback icon so the tray works without a bundled asset.
-    const img = nativeImage.createFromDataURL(
-      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMEAYEjQ4nnAAAAAElFTkSuQmCC"
-    );
+    let img = nativeImage.createFromPath(path.join(__dirname, "assets", "tray.png"));
+    if (img.isEmpty()) {
+      // 1x1 transparent fallback so the tray still works if the asset is missing.
+      img = nativeImage.createFromDataURL(
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMEAYEjQ4nnAAAAAElFTkSuQmCC"
+      );
+    }
     tray = new Tray(img);
     updateTray();
     tray.on("click", () => { if (mainWindow) mainWindow.show(); });
