@@ -1,7 +1,7 @@
 {
   "name": "honest-archive-scan-client",
   "productName": "Honest Archive Scan Client",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Watches a folder and uploads scanned invoices to Honest Archive.",
   "main": "main.js",
   "author": "Honest Archive",
