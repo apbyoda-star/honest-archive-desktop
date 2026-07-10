@@ -22,7 +22,9 @@ function render(state) {
 
   // Configure
   $("watchDir").textContent = state.watchDir || "No folder chosen yet";
-  $("watchDir").classList.toggle("muted", !state.watchDir);
+  $("dirSub").textContent = state.watchDir
+    ? "Directory configured for scans"
+    : "Choose the folder your scanner saves to";
 
   const canWatch = Boolean(state.watchDir);
   const toggle = $("toggleBtn");

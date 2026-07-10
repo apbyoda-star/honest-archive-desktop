@@ -11,9 +11,9 @@
   <header class="topbar">
     <div class="brand">
       <span class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M2 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7z" fill="#e5b94e"/><path d="M2 10h20v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8z" fill="#f2d891"/></svg>
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M2 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7z" fill="#e5b94e"/><path d="M2 10h20v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8z" fill="#1c5372"/></svg>
       </span>
-      <span class="brand-name">HONEST ARCHIVE <b>Scan Client</b></span>
+      <span class="brand-name">HONEST&nbsp;ARCHIVE <b>Scan Client</b></span>
     </div>
     <div class="account" id="account"></div>
   </header>
@@ -22,7 +22,7 @@
   <section id="login" class="view">
     <div class="card">
       <h1>Sign in</h1>
-      <p class="muted">Sign in with your Honest Archive account to connect this computer.</p>
+      <p class="muted">Connect this computer to your Honest Archive account.</p>
       <label>Email</label>
       <input id="email" type="email" placeholder="you@yourshop.com" autocomplete="username" />
       <label>Password</label>
@@ -45,17 +45,20 @@
     </nav>
 
     <div id="tab-configure" class="tabpane">
-      <div class="row">
-        <div class="field">
-          <label>Scan Directory</label>
-          <div class="folder">
-            <span id="watchDir" class="path muted">No folder chosen yet</span>
-            <button id="pickBtn" class="ghost">Browse…</button>
-          </div>
-          <p class="hint">Scanned invoices dropped in this folder upload automatically.</p>
+      <!-- Scan directory -->
+      <div class="dir-card">
+        <span class="dir-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#1c5372" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+        </span>
+        <div class="dir-main">
+          <span class="dir-label">Scan Directory</span>
+          <span id="watchDir" class="dir-path">No folder chosen yet</span>
+          <span id="dirSub" class="dir-sub">Choose the folder your scanner saves to</span>
         </div>
+        <button id="pickBtn" class="ghost">Browse…</button>
       </div>
 
+      <!-- Status / start-stop -->
       <div class="statusbar">
         <span id="dot" class="dot idle"></span>
         <span id="statusText">Idle</span>
@@ -63,16 +66,18 @@
         <button id="toggleBtn" class="primary" disabled>Start watching</button>
       </div>
 
+      <!-- Requirements (mirrors the familiar scan-client copy) -->
       <div class="reqs">
         <h3>Scan file requirements</h3>
-        <ul>
-          <li>Supported formats: PDF, JPG, PNG, TIFF, BMP.</li>
-          <li>Up to 20 MB per file.</li>
-          <li>PDF pages up to Legal / A3 size.</li>
-        </ul>
-        <p class="muted small">Files that don't meet the requirements stay in a <b>failed</b> subfolder with a note.</p>
+        <ol>
+          <li>Supported formats: JPEG, PNG, BMP, PDF and TIFF.</li>
+          <li>File size must be less than 20 MB.</li>
+          <li>Image dimensions at least 50 × 50 pixels and at most 10000 × 10000 pixels. PDF pages up to 17 × 17 inches — Legal or A3 and smaller.</li>
+        </ol>
+        <p class="important"><b>Important:</b> files that don't meet these requirements aren't synced — they stay in the folder (moved to <b>failed</b>) so you can fix and re-drop them.</p>
       </div>
 
+      <!-- Activity -->
       <div class="log">
         <div class="log-head">Activity</div>
         <div id="logBody" class="log-body"></div>
@@ -82,8 +87,8 @@
     <div id="tab-stats" class="tabpane hidden">
       <div class="stat-grid">
         <div class="stat"><span class="stat-num" id="sUploaded">0</span><span class="stat-label">Uploaded</span></div>
-        <div class="stat"><span class="stat-num" id="sFailed">0</span><span class="stat-label">Failed</span></div>
-        <div class="stat wide"><span class="stat-num" id="sLast">—</span><span class="stat-label">Last upload</span></div>
+        <div class="stat"><span class="stat-num fail" id="sFailed">0</span><span class="stat-label">Failed</span></div>
+        <div class="stat wide"><span class="stat-num small" id="sLast">—</span><span class="stat-label">Last upload</span></div>
       </div>
       <p class="muted small">Counts are for this session. Full history lives in the Honest Archive web app.</p>
     </div>
