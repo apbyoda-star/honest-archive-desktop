@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>Honest Archive Scan Client</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Title bar -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M2 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7z" fill="#e5b94e"/><path d="M2 10h20v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8z" fill="#f2d891"/></svg>
+      </span>
+      <span class="brand-name">HONEST ARCHIVE <b>Scan Client</b></span>
+    </div>
+    <div class="account" id="account"></div>
+  </header>
+
+  <!-- Login -->
+  <section id="login" class="view">
+    <div class="card">
+      <h1>Sign in</h1>
+      <p class="muted">Sign in with your Honest Archive account to connect this computer.</p>
+      <label>Email</label>
+      <input id="email" type="email" placeholder="you@yourshop.com" autocomplete="username" />
+      <label>Password</label>
+      <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+      <details class="advanced">
+        <summary>Advanced — server address</summary>
+        <label>Backend URL</label>
+        <input id="apiBase" type="text" />
+      </details>
+      <p id="loginError" class="error hidden"></p>
+      <button id="loginBtn" class="primary">Sign in</button>
+    </div>
+  </section>
+
+  <!-- Main -->
+  <section id="main" class="view hidden">
+    <nav class="tabs">
+      <button class="tab active" data-tab="configure">Configure Scanner</button>
+      <button class="tab" data-tab="stats">Scan Statistics</button>
+    </nav>
+
+    <div id="tab-configure" class="tabpane">
+      <div class="row">
+        <div class="field">
+          <label>Scan Directory</label>
+          <div class="folder">
+            <span id="watchDir" class="path muted">No folder chosen yet</span>
+            <button id="pickBtn" class="ghost">Browse…</button>
+          </div>
+          <p class="hint">Scanned invoices dropped in this folder upload automatically.</p>
+        </div>
+      </div>
+
+      <div class="statusbar">
+        <span id="dot" class="dot idle"></span>
+        <span id="statusText">Idle</span>
+        <div class="spacer"></div>
+        <button id="toggleBtn" class="primary" disabled>Start watching</button>
+      </div>
+
+      <div class="reqs">
+        <h3>Scan file requirements</h3>
+        <ul>
+          <li>Supported formats: PDF, JPG, PNG, TIFF, BMP.</li>
+          <li>Up to 20 MB per file.</li>
+          <li>PDF pages up to Legal / A3 size.</li>
+        </ul>
+        <p class="muted small">Files that don't meet the requirements stay in a <b>failed</b> subfolder with a note.</p>
+      </div>
+
+      <div class="log">
+        <div class="log-head">Activity</div>
+        <div id="logBody" class="log-body"></div>
+      </div>
+    </div>
+
+    <div id="tab-stats" class="tabpane hidden">
+      <div class="stat-grid">
+        <div class="stat"><span class="stat-num" id="sUploaded">0</span><span class="stat-label">Uploaded</span></div>
+        <div class="stat"><span class="stat-num" id="sFailed">0</span><span class="stat-label">Failed</span></div>
+        <div class="stat wide"><span class="stat-num" id="sLast">—</span><span class="stat-label">Last upload</span></div>
+      </div>
+      <p class="muted small">Counts are for this session. Full history lives in the Honest Archive web app.</p>
+    </div>
+  </section>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

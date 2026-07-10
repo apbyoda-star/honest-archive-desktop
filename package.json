@@ -1,0 +1,49 @@
+{
+  "name": "honest-archive-scan-client",
+  "productName": "Honest Archive Scan Client",
+  "version": "1.0.0",
+  "description": "Watches a folder and uploads scanned invoices to Honest Archive.",
+  "main": "main.js",
+  "author": "Honest Archive",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^31.7.6",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.honestarchive.scanclient",
+    "productName": "Honest Archive Scan Client",
+    "files": ["main.js", "preload.js", "renderer/**/*"],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "apbyoda-star",
+        "repo": "honest-archive-desktop",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "Honest-Archive-Scan-Client-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    },
+    "mac": {
+      "target": "dmg",
+      "identity": null,
+      "category": "public.app-category.business",
+      "artifactName": "Honest-Archive-Scan-Client.${ext}"
+    },
+    "dmg": {
+      "artifactName": "Honest-Archive-Scan-Client.${ext}"
+    }
+  }
+}
