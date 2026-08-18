@@ -35,3 +35,34 @@ release is picked up automatically.
 - Polls the watched folder every few seconds; uploads new files to
   `/api/v1/invoices/upload` with the ingest token; moves them to `processed/` or
   `failed/`.
+
+## Filing with folders
+
+The Scan Client watches one folder, and treats **each subfolder inside it as a
+filing destination**:
+
+```
+HonestArchive/            <- the folder you choose
+├── invoice1.pdf          -> filed as an ordinary parts invoice
+├── Tax Documents/        -> filed as "Tax Documents"
+│   └── w9.pdf
+└── Contracts/            -> filed as "Contracts"
+```
+
+A subfolder name is matched against the categories set up under **Settings →
+Categories** in Honest Archive. Matching ignores case, spaces and punctuation, so
+`Tax Documents`, `tax documents` and `TAX_DOCUMENTS` all reach the same category.
+
+If the category is marked **private**, scans dropped in that folder go straight to
+the private area and are hidden from anyone without access — which is the intended
+way to scan customer paperwork, tax documents, or anything else that shouldn't be
+visible shop-wide.
+
+**A folder name that doesn't match any category still uploads.** The document is
+held for review rather than filed as a normal invoice, so a folder you created but
+haven't configured yet can't quietly put sensitive scans where everyone can see
+them.
+
+Only folders **directly inside** the watched folder are used. Nesting deeper is
+ignored, and `processed/` and `failed/` are reserved — each folder gets its own
+pair, so a private document's filename never lands next to the ordinary invoices.

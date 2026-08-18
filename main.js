@@ -77,11 +77,16 @@ async function apiLogin(apiBase, email, password) {
   return { base, ingestToken: stBody.ingest_token, shopName: stBody.shop_name || "", user: body.user };
 }
 
-async function uploadFile(filePath) {
+async function uploadFile(filePath, folder) {
   const base = (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
   const data = fs.readFileSync(filePath);
   const form = new FormData();
   form.append("file", new Blob([data]), path.basename(filePath));
+  // Which subfolder it came from, when it wasn't the watch root. The server maps
+  // this to one of the shop's categories; an unrecognised name holds the document
+  // for review rather than being ignored, so a folder that was created but never
+  // configured doesn't silently file everything as a parts invoice.
+  if (folder) form.append("folder", folder);
   const res = await fetch(base + "/api/v1/invoices/upload", {
     method: "POST",
     headers: { Authorization: "Bearer " + config.ingestToken },
@@ -106,13 +111,56 @@ function uniqueDest(dir, name) {
   return path.join(dir, `${base}_${Date.now()}${ext}`);
 }
 
+// Folders that are ours, not filing destinations.
+const RESERVED_DIRS = ["processed", "failed"];
+
+/**
+ * Every folder to watch: the root, plus each direct subfolder.
+ *
+ * A subfolder is a filing destination — drop a scan in `Tax Documents/` and it
+ * files as a tax document; drop it loose in the root and it's an ordinary parts
+ * invoice. This matches how people already use a filing cabinet, and a shop adds a
+ * new destination by creating a folder rather than by waiting for a release.
+ *
+ * Only ONE level deep. Recursing would eventually walk into a shop's own archive of
+ * years of scans and re-upload all of it.
+ */
+function watchTargets(root) {
+  const targets = [{ dir: root, folder: null }];
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return targets;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (e.name.startsWith(".")) continue;
+    if (RESERVED_DIRS.includes(e.name.toLowerCase())) continue;
+    targets.push({ dir: path.join(root, e.name), folder: e.name });
+  }
+  return targets;
+}
+
 async function scanOnce() {
   // Never let two scans run at once — that double-processes files (file races)
   // and floods the backend with concurrent uploads.
   if (scanInProgress || !config.watchDir || !config.ingestToken) return;
   scanInProgress = true;
   try {
-    const dir = config.watchDir;
+    for (const target of watchTargets(config.watchDir)) {
+      await scanFolder(target.dir, target.folder);
+    }
+  } finally {
+    scanInProgress = false;
+  }
+}
+
+async function scanFolder(dir, folder) {
+  {
+    // processed/ and failed/ live INSIDE the folder the file came from, so a
+    // private document's filename never lands in a shared folder next to the
+    // ordinary invoices, and you can always see where something was filed from.
     const processed = path.join(dir, "processed");
     const failed = path.join(dir, "failed");
     try {
@@ -153,13 +201,13 @@ async function scanOnce() {
       // Re-check the file still exists right before uploading.
       if (!fs.existsSync(full)) continue;
 
-      log("Uploading " + name + " …");
+      log("Uploading " + name + (folder ? ` (${folder})` : "") + " …");
       try {
-        await uploadFile(full);
+        await uploadFile(full, folder);
         fs.renameSync(full, uniqueDest(processed, name));
         stats.uploaded += 1;
         stats.lastUpload = new Date().toLocaleString();
-        log("Uploaded " + name, "ok");
+        log("Uploaded " + name + (folder ? ` → ${folder}` : ""), "ok");
       } catch (e) {
         stats.failed += 1;
         try {
@@ -172,8 +220,6 @@ async function scanOnce() {
       }
       pushState();
     }
-  } finally {
-    scanInProgress = false;
   }
 }
 

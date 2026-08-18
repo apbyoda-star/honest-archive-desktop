@@ -53,7 +53,7 @@
         <div class="dir-main">
           <span class="dir-label">Scan Directory</span>
           <span id="watchDir" class="dir-path">No folder chosen yet</span>
-          <span id="dirSub" class="dir-sub">Choose the folder your scanner saves to</span>
+          <span id="dirSub" class="dir-sub">Choose the folder your scanner saves to — subfolders inside it file by category</span>
         </div>
         <button id="pickBtn" class="ghost">Browse…</button>
       </div>
@@ -64,6 +64,18 @@
         <span id="statusText">Idle</span>
         <div class="spacer"></div>
         <button id="toggleBtn" class="primary" disabled>Start watching</button>
+      </div>
+
+      <!-- Subfolders are the filing mechanism, so it has to be explained where the
+           folder is chosen, not buried in a README nobody opens. -->
+      <div class="reqs">
+        <h3>Filing with folders</h3>
+        <ol>
+          <li>Scans dropped <b>loose</b> in this folder are filed as ordinary parts invoices.</li>
+          <li>Make a <b>subfolder named after one of your categories</b> — for example <b>Tax Documents</b> — and anything you scan into it is filed as that category.</li>
+          <li>If that category is marked private in Honest Archive, those scans go straight to your private area and stay hidden from the rest of your team.</li>
+        </ol>
+        <p class="important"><b>Note:</b> a subfolder whose name doesn&rsquo;t match one of your categories still uploads — the scan is held for you to review rather than filed as a normal invoice. Only folders directly inside this one are watched.</p>
       </div>
 
       <!-- Requirements (mirrors the familiar scan-client copy) -->
