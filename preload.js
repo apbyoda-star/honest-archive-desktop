@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("ha", {
   login: (creds) => ipcRenderer.invoke("login", creds),
   logout: () => ipcRenderer.invoke("logout"),
   pickFolder: () => ipcRenderer.invoke("pick-folder"),
+  refreshCategories: () => ipcRenderer.invoke("refresh-categories"),
   startWatch: () => ipcRenderer.invoke("start-watch"),
   stopWatch: () => ipcRenderer.invoke("stop-watch"),
   openExternal: (url) => ipcRenderer.invoke("open-external", url),

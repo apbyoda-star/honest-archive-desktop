@@ -67,15 +67,26 @@
       </div>
 
       <!-- Subfolders are the filing mechanism, so it has to be explained where the
-           folder is chosen, not buried in a README nobody opens. -->
+           folder is chosen, not buried in a README nobody opens — and the live
+           status below is the only way to know a folder is spelled right BEFORE
+           scanning a stack of documents into it. -->
       <div class="reqs">
         <h3>Filing with folders</h3>
         <ol>
           <li>Scans dropped <b>loose</b> in this folder are filed as ordinary parts invoices.</li>
-          <li>Make a <b>subfolder named after one of your categories</b> — for example <b>Tax Documents</b> — and anything you scan into it is filed as that category.</li>
-          <li>If that category is marked private in Honest Archive, those scans go straight to your private area and stay hidden from the rest of your team.</li>
+          <li>To file by category, first create the category in Honest Archive under <b>Settings &rarr; Categories</b>, then make a subfolder here with the <b>same name</b>.</li>
+          <li>If that category is marked private, scans in its folder go straight to your private area and stay hidden from the rest of your team.</li>
         </ol>
-        <p class="important"><b>Note:</b> a subfolder whose name doesn&rsquo;t match one of your categories still uploads — the scan is held for you to review rather than filed as a normal invoice. Only folders directly inside this one are watched.</p>
+
+        <div id="folderStatusWrap" class="folder-status" hidden>
+          <div class="folder-status-head">
+            <span>Your folders</span>
+            <button id="refreshFoldersBtn" type="button" class="linky">Refresh</button>
+          </div>
+          <ul id="folderStatus"></ul>
+        </div>
+
+        <p class="important"><b>Making a folder does not create a category.</b> A folder that doesn&rsquo;t match one still uploads, but those scans are held for you to review instead of being filed as ordinary invoices — so a folder you haven&rsquo;t set up yet can never put private paperwork where everyone can see it. Only folders directly inside this one are used, and <b>processed</b> and <b>failed</b> are reserved.</p>
       </div>
 
       <!-- Requirements (mirrors the familiar scan-client copy) -->

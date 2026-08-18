@@ -14,6 +14,11 @@ const POLL_MS = 3000;
 let mainWindow = null;
 let tray = null;
 let watchTimer = null;
+// The shop's filing categories, fetched from the server. Used only to TELL the user
+// what each of their subfolders will do — the server still decides on upload, so a
+// stale copy here can misinform but can never misfile.
+let categories = [];
+let privateDocsEnabled = false;
 let scanning = false;
 let scanInProgress = false; // guards against overlapping scans (double-processing)
 
@@ -53,7 +58,62 @@ function currentState() {
     watchDir: config.watchDir || "",
     scanning,
     stats,
+    folders: folderStatuses(),
+    privateDocsEnabled,
   };
+}
+
+/** Normalise a folder name the same way the server does, so what the client shows
+ *  and what the server decides can't disagree. */
+function slugify(name) {
+  return String(name || "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
+}
+
+/**
+ * Each subfolder of the watch folder, and what will actually happen to scans in it.
+ *
+ * This is the answer to "how do I know my folder is set up right?" — without it the
+ * only way to find out is to scan something and go hunting in the web app.
+ */
+function folderStatuses() {
+  if (!config.watchDir) return [];
+  let entries = [];
+  try {
+    entries = fs.readdirSync(config.watchDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith(".")) continue;
+    if (RESERVED_DIRS.includes(e.name.toLowerCase())) continue;
+    const want = slugify(e.name);
+    const hit = categories.find((c) => want === c.key || want === slugify(c.label));
+    out.push({
+      name: e.name,
+      matched: Boolean(hit),
+      label: hit ? hit.label : null,
+      private: Boolean(hit && hit.private),
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function refreshCategories() {
+  if (!config.ingestToken) return;
+  const base = (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+  try {
+    const res = await fetch(base + "/api/v1/invoices/scan-categories", {
+      headers: { Authorization: "Bearer " + config.ingestToken },
+    });
+    if (!res.ok) return;               // older backend: folders still work, just unlabelled
+    const b = await res.json();
+    categories = Array.isArray(b.categories) ? b.categories : [];
+    privateDocsEnabled = Boolean(b.private_docs_enabled);
+  } catch {
+    // Offline is not an error worth shouting about — uploads carry the folder name
+    // regardless and the server is the one that decides.
+  }
 }
 
 // ---- Backend calls ---------------------------------------------------------
@@ -267,7 +327,11 @@ function createWindow() {
   });
   mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
-  mainWindow.webContents.on("did-finish-load", () => pushState());
+  mainWindow.webContents.on("did-finish-load", async () => {
+    pushState();
+    await refreshCategories();
+    pushState();
+  });
 
   // Closing the window hides it to the tray and keeps the uploader running in
   // the background. Fully quit from the tray menu → Quit.
@@ -346,12 +410,14 @@ ipcMain.handle("pick-folder", async () => {
   if (!res.canceled && res.filePaths[0]) {
     config.watchDir = res.filePaths[0];
     saveConfig(config);
+    await refreshCategories();   // so the folder list is right immediately
     pushState();
   }
   return currentState();
 });
 
-ipcMain.handle("start-watch", () => { startWatching(); return currentState(); });
+ipcMain.handle("refresh-categories", async () => { await refreshCategories(); pushState(); return currentState(); });
+ipcMain.handle("start-watch", async () => { await refreshCategories(); startWatching(); return currentState(); });
 ipcMain.handle("stop-watch", () => { stopWatching(); return currentState(); });
 ipcMain.handle("open-external", (_e, url) => shell.openExternal(url));
 

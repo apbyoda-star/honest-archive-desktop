@@ -49,8 +49,13 @@ HonestArchive/            <- the folder you choose
 └── Contracts/            -> filed as "Contracts"
 ```
 
-A subfolder name is matched against the categories set up under **Settings →
-Categories** in Honest Archive. Matching ignores case, spaces and punctuation, so
+**Creating a folder does not create a category.** A subfolder name is matched
+against the categories already set up under **Settings → Categories** in Honest
+Archive — make the category there first, then make a folder with the same name. The
+app lists your folders and shows exactly what each one will do, so you can check
+the spelling before scanning anything into it.
+
+Matching ignores case, spaces and punctuation, so
 `Tax Documents`, `tax documents` and `TAX_DOCUMENTS` all reach the same category.
 
 If the category is marked **private**, scans dropped in that folder go straight to

@@ -5,6 +5,46 @@ function show(view) {
   $("main").classList.toggle("hidden", view !== "main");
 }
 
+/**
+ * What each subfolder will actually do with a scan.
+ *
+ * Without this the only way to find out a folder is misspelled — or that the
+ * category was never created — is to scan documents into it and go looking in the
+ * web app. For private paperwork that is exactly the wrong time to find out.
+ */
+function renderFolders(state) {
+  const wrap = $("folderStatusWrap");
+  const list = $("folderStatus");
+  if (!wrap || !list) return;
+  const folders = state.folders || [];
+  if (!state.watchDir) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+
+  if (folders.length === 0) {
+    list.innerHTML =
+      '<li class="fs-none">No subfolders yet — everything here files as an ordinary parts invoice.</li>';
+    return;
+  }
+  list.innerHTML = folders
+    .map((f) => {
+      const name = escapeHtml(f.name);
+      if (!f.matched) {
+        return `<li class="fs-bad"><b>${name}</b> — no matching category. Scans here are held for review.</li>`;
+      }
+      if (f.private) {
+        return `<li class="fs-private"><b>${name}</b> — files as <b>${escapeHtml(f.label)}</b> · private</li>`;
+      }
+      return `<li class="fs-ok"><b>${name}</b> — files as <b>${escapeHtml(f.label)}</b></li>`;
+    })
+    .join("");
+}
+
+function escapeHtml(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 function render(state) {
   // Account area
   const acct = $("account");
@@ -25,6 +65,8 @@ function render(state) {
   $("dirSub").textContent = state.watchDir
     ? "Directory configured for scans"
     : "Choose the folder your scanner saves to";
+
+  renderFolders(state);
 
   const canWatch = Boolean(state.watchDir);
   const toggle = $("toggleBtn");
@@ -95,3 +137,8 @@ document.querySelectorAll(".tab").forEach((t) => {
 window.ha.onState(render);
 window.ha.onStatus(addLog);
 window.ha.getState().then(render);
+
+// Manual refresh: someone will make a folder while the app is open, and polling for
+// it would be noise.
+const _rf = $("refreshFoldersBtn");
+if (_rf) _rf.onclick = async () => render(await window.ha.refreshCategories());

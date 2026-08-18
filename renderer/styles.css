@@ -106,3 +106,24 @@ button.ghost:hover { border-color: var(--navy); }
 .stat-num.fail { color: var(--rose); }
 .stat-num.small { font-size: 18px; color: var(--ink); }
 .stat-label { color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
+
+/* Folder filing status ---------------------------------------------------- */
+.folder-status { margin-top: 14px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 12px; }
+.folder-status-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  font-weight: 700; opacity: .65; margin-bottom: 8px;
+}
+.folder-status ul { list-style: none; margin: 0; padding: 0; }
+.folder-status li { font-size: 12.5px; padding: 5px 0 5px 18px; position: relative; line-height: 1.45; }
+.folder-status li::before { position: absolute; left: 0; top: 5px; font-weight: 700; }
+.fs-ok::before      { content: "✓"; color: #34d399; }
+.fs-private::before { content: "🔒"; font-size: 11px; }
+.fs-bad::before     { content: "!"; color: #fbbf24; }
+.fs-none            { opacity: .6; padding-left: 0 !important; }
+.fs-none::before    { content: ""; }
+.linky {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: #60a5fa; font-size: 11px; font-weight: 700; text-transform: none; letter-spacing: 0;
+}
+.linky:hover { text-decoration: underline; }
