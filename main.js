@@ -187,10 +187,43 @@ async function refreshCategories() {
   }
 }
 
+/**
+ * A server address as typed ("localhost:8000", "honestarchive.example.com/") made
+ * into one the app can use: http:// added for this computer (localhost, 127.x,
+ * [::1]), https:// for anything else, trailing slashes dropped. The sign-in screen
+ * and "Change address" both use this, so an address that works in one works in
+ * the other. Returns { addr, schemeAdded } or { error }.
+ */
+function normalizeAddress(raw) {
+  let addr = String(raw || "").trim();
+  if (!addr) return { error: "Type the server address first." };
+  const schemeAdded = !/^https?:\/\//i.test(addr);
+  if (schemeAdded) addr = (/^(localhost(?=[:/]|$)|127\.|\[::1\])/i.test(addr) ? "http://" : "https://") + addr;
+  try {
+    const u = new URL(addr);
+    if (!u.hostname) throw new Error("no host");
+    addr = (u.origin + u.pathname).replace(/\/+$/, "");
+  } catch {
+    return { error: "That doesn't look like a web address — it should look like https://example.com." };
+  }
+  return { addr, schemeAdded };
+}
+
 // ---- Backend calls ---------------------------------------------------------
 async function apiLogin(apiBase, email, password) {
-  const base = (apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
-  const unreachable = () => new Error(`Can't reach Honest Archive at ${base}. Check the server address and the internet connection.`);
+  let base = DEFAULT_API_BASE;
+  let schemeAdded = false;
+  if (String(apiBase || "").trim()) {
+    const n = normalizeAddress(apiBase);
+    if (n.error) throw new Error(n.error);
+    base = n.addr;
+    schemeAdded = n.schemeAdded;
+  }
+  // Typed without http(s)://: say which address was actually tried, and what a
+  // full one looks like — not just "check the internet connection".
+  const unreachable = () => new Error(schemeAdded
+    ? `Can't reach Honest Archive at ${base} (“${String(apiBase).trim()}” with ${base.startsWith("https:") ? "https://" : "http://"} added). Check the server address — it should look like https://example.com — and the internet connection.`
+    : `Can't reach Honest Archive at ${base}. Check the server address and the internet connection.`);
   let res;
   try {
     res = await fetch(base + "/api/v1/auth/login", {
@@ -1211,7 +1244,7 @@ async function scanPersonal(root) {
             feed.sentAt = Date.now();
           }
         } else if (good.length) {
-          log(`Sent “${chunk[0].name}” — it'll be filed in a minute or two.`, "ok");
+          log(`Sent “${chunk[0].name}” — it'll be filed shortly. You'll see it under Scans in Honest Archive.`, "ok");
         }
         pingSoon();
         pushState();
@@ -1226,7 +1259,7 @@ async function scanPersonal(root) {
     if (now - Math.max(feed.lastNewAt, feed.sentAt || 0) < FEED_QUIET_MS) continue;
     const cap = feed.desc.charAt(0).toUpperCase() + feed.desc.slice(1);
     if (feed.sent > 0) {
-      log(`${cap} (${plural(feed.sent, "page")}) sent — it'll be filed in a minute or two.`, "ok");
+      log(`${cap} (${plural(feed.sent, "page")}) sent — it'll be filed shortly. You'll see it under Scans in Honest Archive.`, "ok");
     } else if (feed.repeats > 0) {
       log(`${cap}: ${feed.repeats === 1 ? "that page was" : "those pages were"} already sent earlier — nothing new to file.`, "ok");
     }
@@ -1541,15 +1574,9 @@ ipcMain.handle("stop-watch", () => { stopWatching(); return currentState(); });
  *  away with a real check-in — so "check the server address" is something a
  *  person can actually do. */
 ipcMain.handle("set-server", async (_e, raw) => {
-  let addr = String(raw || "").trim();
-  if (!addr) return { ok: false, message: "Type the server address first.", state: currentState() };
-  if (!/^https?:\/\//i.test(addr)) addr = (/^(localhost|127\.|\[::1\])/i.test(addr) ? "http://" : "https://") + addr;
-  try {
-    const u = new URL(addr);
-    addr = (u.origin + u.pathname).replace(/\/+$/, "");
-  } catch {
-    return { ok: false, message: "That doesn't look like a web address — it should look like https://example.com.", state: currentState() };
-  }
+  const norm = normalizeAddress(raw);
+  if (norm.error) return { ok: false, message: norm.error, state: currentState() };
+  const addr = norm.addr;
   const personal = config.accountType === "personal";
   const previous = apiBaseUrl();
   const changed = addr !== previous;
@@ -1601,20 +1628,28 @@ ipcMain.handle("set-server", async (_e, raw) => {
   if (ok && personal) {
     config.apiBase = addr;
     saveConfig(config);
-    if (changed) log("Server address changed to " + addr, "info");
+    // Said as part of the one "Connected" line below, not as a line of its own.
+    if (changed) message = `Server address changed to ${addr}. Connected — Honest Archive answered there.`;
   }
   if (ok) {
     // Everything that was waiting on the address goes now.
     P.block = null;
     P.groupBackoff.clear();
-    noteConnected();
+    // The message below is the one "Connected" line: clear the trouble quietly
+    // rather than letting noteConnected() log "Connected … again" as well.
+    // (Shops never set P.trouble, so this changes nothing for them.)
+    P.trouble = null;
     if (config.accountType === "personal" && config.watchDir) {
+      const before = personalInbox(config.watchDir).length;
       const n = retryFailed(config.watchDir, "address");
       refreshFailedCounts(config.watchDir);
-      // The pages just moved back are waiting again (the message below is the
-      // one line that says so).
+      // The pages just moved back are waiting again, along with any that were
+      // waiting in the folder while Honest Archive couldn't be reached.
       P.waiting = personalInbox(config.watchDir).length;
-      if (n) message += ` Sending ${plural(n, "page")} again that ${n === 1 ? "was" : "were"} waiting on the address.`;
+      const parts = [];
+      if (n) parts.push(`${plural(n, "page")} again that ${n === 1 ? "was" : "were"} waiting on the address`);
+      if (before) parts.push(`${plural(before, "waiting page")}${n ? "" : " from the folder"}`);
+      if (parts.length) message += ` Sending ${parts.join(" and ")}.`;
     } else {
       await refreshCategories();
     }
