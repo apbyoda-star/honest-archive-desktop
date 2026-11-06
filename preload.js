@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("ha", {
   startWatch: () => ipcRenderer.invoke("start-watch"),
   stopWatch: () => ipcRenderer.invoke("stop-watch"),
   openExternal: (url) => ipcRenderer.invoke("open-external", url),
+  retryFailed: () => ipcRenderer.invoke("retry-failed"),
   onState: (cb) => ipcRenderer.on("state", (_e, s) => cb(s)),
   onStatus: (cb) => ipcRenderer.on("status", (_e, s) => cb(s)),
 });

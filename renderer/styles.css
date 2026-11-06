@@ -80,7 +80,12 @@ button.ghost:hover { border-color: var(--navy); }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .dot.idle { background: var(--ink-3); }
 .dot.watching { background: var(--emerald); box-shadow: 0 0 0 4px rgba(15,157,107,.16); }
-#statusText { font-weight: 600; color: var(--ink); }
+#statusText { font-weight: 600; color: var(--ink); line-height: 1.4; }
+.dot.attention { background: var(--rose); box-shadow: 0 0 0 4px rgba(192,67,63,.16); }
+.dot.offline { background: #c98a12; box-shadow: 0 0 0 4px rgba(201,138,18,.18); }
+.statusbar button { flex: none; }
+.help-note { margin: 12px 0 0; line-height: 1.55; }
+[hidden] { display: none !important; }
 
 /* Requirements */
 .reqs { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }

@@ -63,6 +63,7 @@
         <span id="dot" class="dot idle"></span>
         <span id="statusText">Idle</span>
         <div class="spacer"></div>
+        <button id="retryBtn" class="ghost" type="button" hidden>Retry failed scans</button>
         <button id="toggleBtn" class="primary" disabled>Start watching</button>
       </div>
 
@@ -77,6 +78,8 @@
           <li>Put the paper in and press the scanner's button. Mixed stacks are fine — bills, letters, statements, all together.</li>
           <li>When the scanner stops, everything it scanned is sent together and Honest Archive sorts it into documents and folders for you.</li>
         </ol>
+        <p class="muted help-note">The Brother setting that saves <b>one file per page</b> is fine — the pages are put back together in order. Saving into a dated folder inside this one is fine too.</p>
+        <p class="muted help-note">If the internet drops or a page jams, nothing is lost: pages wait here and are sent as soon as Honest Archive can be reached.</p>
       </div>
 
       <div class="reqs" id="shopFolderHelp">
@@ -99,7 +102,7 @@
       </div>
 
       <!-- Requirements (mirrors the familiar scan-client copy) -->
-      <div class="reqs">
+      <div class="reqs" id="shopReqs">
         <h3>Scan file requirements</h3>
         <ol>
           <li>Supported formats: JPEG, PNG, BMP, PDF and TIFF.</li>

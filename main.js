@@ -61,6 +61,14 @@ function currentState() {
     folders: config.accountType === "personal" ? [] : folderStatuses(),
     privateDocsEnabled,
     accountType: config.accountType || "shop",
+    // Honest Archive Personal only: what's waiting, what failed, and whether the
+    // server can be reached — the window shows an attention state from these.
+    personal: config.accountType === "personal" ? {
+      waiting: P.waiting,
+      failed: P.failed,
+      trouble: P.trouble,
+      problem: P.trouble || P.failed ? personalProblem() : null,
+    } : null,
   };
 }
 
@@ -151,116 +159,491 @@ async function apiLogin(apiBase, email, password) {
 //     Scan2026-11-03_094512_001.pdf, Scan2026-11-03_094512_002.pdf, ...
 // Pages of one paper document are therefore split across files, and only the
 // whole feed, in order, tells the server where one document ends and the next
-// begins. So Personal accounts upload a FEED at a time: wait until no new page
-// has appeared for SETTLE_MS (the scanner has stopped), then send every page of
-// that feed in one batch with its key.
+// begins. So every page goes up under its feed's key with complete=false, as soon
+// as the file has finished arriving; the SERVER closes the feed once no new page
+// has come for a minute. That survives paper jams (the feed just pauses), and a
+// retried page is harmless because the server skips file names it already has
+// for that feed. Loose files (a photo, a PDF dropped in by hand) are each their
+// own batch and go up with complete=true.
+//
+// Files only ever move to failed/ when Honest Archive looked at them and said no
+// (a damaged file, too big). If the server can't be reached, or has a hiccup, the
+// pages stay exactly where the scanner put them and are tried again later.
 const BROTHER_RE = /^(.+?)_(\d{3,4})\.(pdf|jpe?g|png|tiff?|bmp)$/i;
-const SETTLE_MS = 20000;
 const PAGES_PER_REQUEST = 25;
+const MIN_FILE_AGE_MS = 3000;            // a page must be this old AND unchanged since the last look
+const FEED_QUIET_MS = 65000;             // matches the server's 60s settle (+ a little)
+const PING_MS = 5 * 60 * 1000;
+const AUTO_RETRY_MS = 60 * 60 * 1000;
+const BACKOFF_MS = [30e3, 60e3, 120e3, 240e3, 480e3, 600e3];
+const UPLOAD_TIMEOUT_MS = 120000;
+const PING_TIMEOUT_MS = 15000;
+
+const P = {
+  seen: new Map(),        // full path -> {size, mtime} from the previous look
+  feeds: new Map(),       // feed key -> {desc, total, sent, lastNewAt}
+  groupBackoff: new Map(),// feed key -> {attempts, nextAt}  (server hiccups for one feed)
+  block: null,            // {kind, attempts, nextAt, since}  (can't reach / sign-in refused)
+  trouble: null,          // what was last logged about the connection, so it's said ONCE
+  lastReject: "",         // plain-words reason for the newest file moved to failed/
+  waiting: 0,
+  failed: 0,
+  lastPing: 0,
+  pingAt: 0,              // a ping is due at this time (after uploads/failures)
+  lastAutoRetry: 0,
+};
 
 function batchKeyFor(name) {
   const m = BROTHER_RE.exec(name);
-  return m ? { key: m[1], seq: parseInt(m[2], 10) } : null;
+  // A scanner feed's key carries the date/time the feed started; "IMG_0423.jpg"
+  // from a phone does not, and must stay a loose file (its own batch).
+  if (!m || !/\d{6}/.test(m[1])) return null;
+  return { key: m[1], seq: parseInt(m[2], 10) };
 }
 
-async function uploadPersonalBatch(key, files, isScannerFeed) {
-  const base = (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
-  for (let i = 0; i < files.length; i += PAGES_PER_REQUEST) {
-    const chunk = files.slice(i, i + PAGES_PER_REQUEST);
-    const last = i + PAGES_PER_REQUEST >= files.length;
-    const form = new FormData();
-    for (const f of chunk) form.append("files", new Blob([fs.readFileSync(f.full)]), f.name);
-    // Loose files (not a Brother feed) still go up together as one batch, under a
-    // key of our own so a retry lands in the same batch instead of duplicating.
-    form.append("batch_key", isScannerFeed ? key : key);
-    form.append("complete", last ? "true" : "false");
-    const res = await fetch(base + "/api/v1/personal/scans", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + config.ingestToken },
-      body: form,
-    });
-    if (!res.ok) {
-      let detail = "HTTP " + res.status;
-      try {
-        const b = await res.json();
-        if (b && b.detail) detail = typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail);
-      } catch {}
-      throw new Error(detail);
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** "scan from Nov 5, 8:12 AM" for a Brother key; never the raw key. */
+function describeFeed(key, firstName) {
+  const m = /(\d{4})-?(\d{2})-?(\d{2})[_\-T ]?(\d{2})(\d{2})(\d{2})?/.exec(key || "");
+  if (m) {
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+    if (!isNaN(d.getTime())) {
+      return "scan from " + d.toLocaleString("en-US", {
+        month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+      });
     }
   }
+  return firstName ? `“${firstName}”` : "scan";
+}
+
+class SendError extends Error {
+  // kind: "offline" (can't reach), "server" (5xx/429/408 — temporary),
+  //       "account" (401/402/403 — sign-in/plan), "rejected" (the server said no to the file)
+  constructor(message, kind, status) {
+    super(message);
+    this.kind = kind;
+    this.status = status || 0;
+  }
+}
+
+function apiBaseUrl() {
+  return (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+}
+
+async function personalFetch(urlPath, opts, timeoutMs) {
+  let res;
+  try {
+    res = await fetch(apiBaseUrl() + urlPath, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
+  } catch {
+    throw new SendError("Can't reach Honest Archive.", "offline");
+  }
+  if (res.ok) return res;
+  let detail = "";
+  try {
+    const b = await res.json();
+    if (b && typeof b.detail === "string") detail = b.detail;
+  } catch {}
+  const s = res.status;
+  if (s >= 500 || s === 429 || s === 408) {
+    throw new SendError("Honest Archive is having trouble right now.", "server", s);
+  }
+  if (s === 401 || s === 403) {
+    throw new SendError("Honest Archive didn't accept this computer's sign-in. Sign out of the Scan Client and sign in again.", "account", s);
+  }
+  if (s === 402) {
+    throw new SendError(detail || "The Honest Archive subscription needs attention.", "account", s);
+  }
+  let reason;
+  if (s === 413) reason = detail || "This file is too big to send.";
+  else if (s === 404) reason = "Honest Archive didn't recognise this upload — check the server address in the Scan Client, or that this is a home (Personal) account.";
+  else reason = (detail && detail !== "Not Found") ? detail : "Honest Archive couldn't open this file. Scan it again as a PDF.";
+  throw new SendError(reason, "rejected", s);
+}
+
+async function sendPages(key, files, complete) {
+  const form = new FormData();
+  for (const f of files) form.append("files", new Blob([fs.readFileSync(f.full)]), f.name);
+  form.append("batch_key", key);
+  form.append("complete", complete ? "true" : "false");
+  await personalFetch("/api/v1/personal/scans", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + config.ingestToken },
+    body: form,
+  }, UPLOAD_TIMEOUT_MS);
+}
+
+/** Supported files the scanner (or a person) left in the watch folder or one of
+ *  its direct subfolders — the scanner may save into a dated subfolder. */
+function personalInbox(root) {
+  const dirs = [root];
+  try {
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!e.isDirectory() || e.name.startsWith(".")) continue;
+      if (RESERVED_DIRS.includes(e.name.toLowerCase())) continue;
+      dirs.push(path.join(root, e.name));
+    }
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      if (name.startsWith(".")) continue;
+      if (!SUPPORTED.includes(path.extname(name).toLowerCase())) continue;
+      const full = path.join(dir, name);
+      let st;
+      try { st = fs.statSync(full); } catch { continue; }
+      if (!st.isFile() || st.size === 0) continue;
+      out.push({ name, full, size: st.size, mtime: st.mtimeMs });
+    }
+  }
+  return out;
+}
+
+function failedFiles(root) {
+  try {
+    return fs.readdirSync(path.join(root, "failed"))
+      .filter((n) => !n.startsWith(".") && SUPPORTED.includes(path.extname(n).toLowerCase()));
+  } catch {
+    return [];
+  }
+}
+
+function backoffMs(attempts) {
+  return BACKOFF_MS[Math.min(attempts, BACKOFF_MS.length) - 1] || BACKOFF_MS[0];
+}
+
+/** Say once that something's wrong with the connection; say once when it's fixed. */
+function noteTrouble(kind) {
+  if (P.trouble === kind) return;
+  P.trouble = kind;
+  const n = P.waiting;
+  const safe = n ? ` ${plural(n, "page")} ${n === 1 ? "is" : "are"} waiting safely in the folder.` : "";
+  if (kind === "offline") log("Can't reach Honest Archive — will keep trying." + safe, "error");
+  else if (kind === "server") log("Honest Archive is having trouble right now — will keep trying." + safe, "error");
+  else if (kind === "account") log((P.block && P.block.message) || "Honest Archive didn't accept this computer's sign-in.", "error");
+}
+
+function noteConnected() {
+  if (!P.trouble) return;
+  P.trouble = null;
+  const n = P.waiting;
+  log("Connected to Honest Archive again" + (n ? ` — sending ${plural(n, "waiting page")}.` : "."), "ok");
+}
+
+function recordRejected(root, label, files, reason) {
+  const failedDir = path.join(root, "failed");
+  const moved = [];
+  for (const f of files) {
+    try {
+      if (!fs.existsSync(f.full)) continue;
+      const dest = uniqueDest(failedDir, f.name);
+      fs.renameSync(f.full, dest);
+      moved.push(path.basename(dest));
+    } catch {}
+    P.seen.delete(f.full);
+  }
+  if (!moved.length) return;
+  const safeLabel = String(label).replace(/[^\w.\- ]+/g, "_").slice(0, 80);
+  let errPath = path.join(failedDir, safeLabel + ".error.txt");
+  if (fs.existsSync(errPath)) errPath = path.join(failedDir, `${safeLabel}_${Date.now()}.error.txt`);
+  try {
+    fs.writeFileSync(errPath, [
+      "Couldn't send: " + reason,
+      "When: " + new Date().toLocaleString(),
+      "Files: " + moved.join(", "),
+      "Kind: rejected",
+      "",
+      "Fix the file (or scan it again) and press “Retry failed scans” in the Scan Client.",
+      "",
+    ].join("\n"));
+  } catch {}
+  stats.failed += moved.length;
+  P.lastReject = reason;
+}
+
+/** Error records in failed/ and the files each one covers. Older versions wrote
+ *  records without a Files: line — work the files out from the record's name. */
+function failedRecords(root) {
+  const failedDir = path.join(root, "failed");
+  let names = [];
+  try { names = fs.readdirSync(failedDir); } catch { return []; }
+  const pages = names.filter((n) => SUPPORTED.includes(path.extname(n).toLowerCase()));
+  const out = [];
+  for (const n of names) {
+    if (!n.endsWith(".error.txt")) continue;
+    let text = "";
+    try { text = fs.readFileSync(path.join(failedDir, n), "utf-8"); } catch { continue; }
+    const label = n.slice(0, -".error.txt".length);
+    const fl = /^Files: (.*)$/m.exec(text);
+    let files;
+    if (fl) {
+      files = fl[1].split(",").map((s) => s.trim()).filter(Boolean);
+    } else if (label.startsWith("file-")) {
+      const base = label.slice(5).replace(/-\d+$/, "");
+      files = pages.filter((p) => path.basename(p, path.extname(p)).startsWith(base));
+    } else if (pages.includes(label)) {
+      files = [label];
+    } else {
+      files = pages.filter((p) => { const b = batchKeyFor(p); return b && b.key === label; });
+    }
+    const kindLine = /^Kind: (\w+)/m.exec(text);
+    const network = kindLine
+      ? kindLine[1] !== "rejected"
+      : /HTTP (5\d\d|429|408)\b|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ENETUNREACH|socket|network|timed? ?out|aborted|terminated/i.test(text);
+    out.push({ record: path.join(failedDir, n), files, network });
+  }
+  return out;
+}
+
+/** Move failed pages back into the watch folder so they're sent again. Brother
+ *  pages keep their names, so a feed regroups by itself. */
+function retryFailed(root, onlyNetwork) {
+  const failedDir = path.join(root, "failed");
+  const records = failedRecords(root);
+  let wanted;
+  if (onlyNetwork) {
+    wanted = new Set();
+    for (const r of records) if (r.network) r.files.forEach((f) => wanted.add(f));
+  } else {
+    wanted = new Set(failedFiles(root));
+  }
+  let moved = 0;
+  for (const name of wanted) {
+    const from = path.join(failedDir, name);
+    const to = path.join(root, name);
+    try {
+      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
+      fs.renameSync(from, to);
+      moved += 1;
+    } catch {}
+  }
+  // Drop records whose files have all gone back.
+  for (const r of records) {
+    if (r.files.every((f) => !fs.existsSync(path.join(failedDir, f)))) {
+      try { fs.unlinkSync(r.record); } catch {}
+    }
+  }
+  if (moved) {
+    P.lastReject = "";
+    P.groupBackoff.clear();
+    if (P.block) P.block.nextAt = 0;
+  }
+  return moved;
+}
+
+function personalProblem() {
+  if (!scanning) return "The Scan Client is paused — press Start watching on the scanner computer.";
+  if (P.block && P.block.kind === "account") return P.block.message;
+  if (P.trouble === "offline") return "The scanner computer can't reach Honest Archive.";
+  if (P.trouble === "server") return "Honest Archive had trouble receiving scans — the Scan Client keeps trying.";
+  if (P.failed > 0) {
+    if (!P.lastReject && config.watchDir) {
+      // After a restart: take the reason from the newest record in failed/.
+      let newest = null;
+      for (const r of failedRecords(config.watchDir)) {
+        try {
+          const t = fs.statSync(r.record).mtimeMs;
+          if (!newest || t > newest.t) newest = { t, path: r.record };
+        } catch {}
+      }
+      if (newest) {
+        try {
+          const m = /^Couldn't send: (.*)$/m.exec(fs.readFileSync(newest.path, "utf-8"));
+          if (m) P.lastReject = m[1].trim();
+        } catch {}
+      }
+    }
+    return `${plural(P.failed, "page")} couldn't be sent` + (P.lastReject ? `: ${P.lastReject}` : ". Press “Retry failed scans” on the scanner computer.");
+  }
+  return null;
+}
+
+async function pingPersonal() {
+  if (config.accountType !== "personal" || !config.ingestToken) return;
+  P.lastPing = Date.now();
+  P.pingAt = 0;
+  if (config.watchDir) {
+    P.waiting = personalInbox(config.watchDir).length;
+    P.failed = failedFiles(config.watchDir).length;
+  }
+  try {
+    await personalFetch("/api/v1/personal/scanner/ping", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + config.ingestToken, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: appVersion(),
+        waiting: P.waiting,
+        failed: P.failed,
+        message: personalProblem(),
+      }),
+    }, PING_TIMEOUT_MS);
+    // The server answered, so if we were waiting out a "can't reach", try now.
+    if (P.block && P.block.kind === "offline") P.block.nextAt = 0;
+  } catch {
+    // A missed check-in is what tells the website the computer is offline.
+  }
+}
+
+function pingSoon() {
+  if (!P.pingAt) P.pingAt = Date.now() + 3000;
+}
+
+function appVersion() {
+  try { return app.getVersion(); } catch { return ""; }
 }
 
 async function scanPersonal(root) {
   const processed = path.join(root, "processed");
-  const failed = path.join(root, "failed");
   try {
     fs.mkdirSync(processed, { recursive: true });
-    fs.mkdirSync(failed, { recursive: true });
+    fs.mkdirSync(path.join(root, "failed"), { recursive: true });
   } catch {}
-  let entries = [];
-  try {
-    entries = fs.readdirSync(root);
-  } catch {
-    return;
-  }
-  const groups = new Map(); // key -> {files:[{name,full,seq,size,mtime}], scanner}
-  for (const name of entries) {
-    if (name.startsWith(".")) continue;
-    if (!SUPPORTED.includes(path.extname(name).toLowerCase())) continue;
-    const full = path.join(root, name);
-    let st;
-    try {
-      st = fs.statSync(full);
-    } catch {
-      continue;
-    }
-    if (!st.isFile() || st.size === 0) continue;
-    const b = batchKeyFor(name);
-    const key = b ? b.key : "file-" + path.basename(name, path.extname(name)).slice(0, 60) + "-" + Math.round(st.mtimeMs);
-    if (!groups.has(key)) groups.set(key, { files: [], scanner: Boolean(b) });
-    groups.get(key).files.push({ name, full, seq: b ? b.seq : 0, size: st.size, mtime: st.mtimeMs });
-  }
   const now = Date.now();
-  for (const [key, g] of groups) {
-    const newest = Math.max(...g.files.map((f) => f.mtime));
-    if (now - newest < SETTLE_MS) {
-      log(`Waiting for the scanner to finish (${g.files.length} page${g.files.length === 1 ? "" : "s"} so far)…`);
-      continue;
-    }
-    // Size-stable check across the whole feed.
-    await new Promise((r) => setTimeout(r, 800));
-    let stable = true;
-    for (const f of g.files) {
-      try {
-        if (fs.statSync(f.full).size !== f.size) stable = false;
-      } catch {
-        stable = false;
-      }
-    }
-    if (!stable) continue;
-    g.files.sort((a, b) => a.seq - b.seq || a.name.localeCompare(b.name));
-    const n = g.files.length;
-    log(`Uploading ${n} page${n === 1 ? "" : "s"} (${key}) …`);
-    try {
-      await uploadPersonalBatch(key, g.files, g.scanner);
-      for (const f of g.files) {
-        try { fs.renameSync(f.full, uniqueDest(processed, f.name)); } catch {}
-      }
-      stats.uploaded += n;
-      stats.lastUpload = new Date().toLocaleString();
-      log(`Sent ${n} page${n === 1 ? "" : "s"} — they'll be filed in a minute or two.`, "ok");
-    } catch (e) {
-      stats.failed += n;
-      for (const f of g.files) {
-        try {
-          if (fs.existsSync(f.full)) fs.renameSync(f.full, uniqueDest(failed, f.name));
-        } catch {}
-      }
-      try { fs.writeFileSync(path.join(failed, key + ".error.txt"), String(e.message || e)); } catch {}
-      log(`Couldn't send ${key}: ${e.message || e}`, "error");
-    }
-    pushState();
+
+  if (now - P.lastAutoRetry >= AUTO_RETRY_MS) {
+    P.lastAutoRetry = now;
+    const n = retryFailed(root, true);
+    if (n) log(`Trying ${plural(n, "page")} again that couldn't be sent earlier because of a connection problem.`);
   }
+
+  const files = personalInbox(root);
+  const present = new Set(files.map((f) => f.full));
+  for (const k of P.seen.keys()) if (!present.has(k)) P.seen.delete(k);
+
+  // Group into feeds; a page is ready once it's a few seconds old and hasn't
+  // changed since the previous look (the scanner has finished writing it).
+  const groups = new Map();
+  for (const f of files) {
+    const prev = P.seen.get(f.full);
+    f.ready = Boolean(prev && prev.size === f.size && prev.mtime === f.mtime && now - f.mtime >= MIN_FILE_AGE_MS);
+    P.seen.set(f.full, { size: f.size, mtime: f.mtime });
+    const b = batchKeyFor(f.name);
+    f.seq = b ? b.seq : 0;
+    const key = b ? b.key
+      : "file-" + path.basename(f.name, path.extname(f.name)).slice(0, 60) + "-" + Math.round(f.mtime);
+    if (!groups.has(key)) groups.set(key, { key, scanner: Boolean(b), files: [] });
+    groups.get(key).files.push(f);
+  }
+  const prevWaiting = P.waiting;
+  P.waiting = files.length;
+  P.failed = failedFiles(root).length;
+
+  // Tell people what the scanner is doing — only when the page count changes.
+  for (const g of groups.values()) {
+    if (!g.scanner) continue;
+    g.files.sort((a, b) => a.seq - b.seq || a.name.localeCompare(b.name));
+    let feed = P.feeds.get(g.key);
+    if (!feed) {
+      feed = { desc: describeFeed(g.key, g.files[0].name), total: 0, sent: 0, lastNewAt: now };
+      P.feeds.set(g.key, feed);
+    }
+    const total = feed.sent + g.files.length;
+    if (total > feed.total) {
+      feed.total = total;
+      feed.lastNewAt = now;
+      const cap = feed.desc.charAt(0).toUpperCase() + feed.desc.slice(1);
+      log(`${cap}: ${plural(total, "page")} so far — waiting for the scanner to finish…`);
+    }
+  }
+
+  const blocked = P.block && now < P.block.nextAt;
+  if (!blocked) {
+    const order = [...groups.values()].sort(
+      (a, b) => Math.min(...a.files.map((f) => f.mtime)) - Math.min(...b.files.map((f) => f.mtime)));
+    outer:
+    for (const g of order) {
+      const gb = P.groupBackoff.get(g.key);
+      if (gb && now < gb.nextAt) continue;
+      const ready = g.files.filter((f) => f.ready);
+      if (!ready.length) continue;
+      for (let i = 0; i < ready.length; i += PAGES_PER_REQUEST) {
+        const chunk = ready.slice(i, i + PAGES_PER_REQUEST);
+        try {
+          await sendPages(g.key, chunk, !g.scanner);
+        } catch (e) {
+          if (!(e instanceof SendError)) {
+            // A file vanished or couldn't be read mid-way — look again next poll.
+            continue outer;
+          }
+          if (e.kind === "rejected") {
+            // If the server named one page, fail only that one; the rest go next poll.
+            const named = chunk.length > 1 ? chunk.find((f) => e.message.includes(f.name)) : null;
+            const bad = named ? [named] : chunk;
+            recordRejected(root, g.scanner ? g.key : bad[0].name, bad, e.message);
+            const what = g.scanner ? `${plural(bad.length, "page")} of the ${describeFeed(g.key, bad[0].name)}` : `“${bad[0].name}”`;
+            log(`Couldn't send ${what}: ${e.message} It's in the “failed” folder.`, "error");
+            noteConnected();
+            pingSoon();
+            pushState();
+            continue outer;
+          }
+          if (e.kind === "server") {
+            const attempts = ((gb && gb.attempts) || 0) + 1;
+            P.groupBackoff.set(g.key, { attempts, nextAt: Date.now() + backoffMs(attempts) });
+            noteTrouble("server");
+            pingSoon();
+            pushState();
+            continue outer;
+          }
+          // Can't reach the server, or it refused this computer's sign-in: stop
+          // for now, leave every file where it is, try again after a pause.
+          const attempts = (P.block && P.block.kind === e.kind ? P.block.attempts : 0) + 1;
+          P.block = { kind: e.kind, attempts, nextAt: Date.now() + backoffMs(attempts), message: e.message,
+                      since: (P.block && P.block.since) || new Date() };
+          noteTrouble(e.kind);
+          pushState();
+          break outer;
+        }
+        // Sent.
+        P.block = null;
+        P.groupBackoff.delete(g.key);
+        noteConnected();
+        for (const f of chunk) {
+          try { fs.renameSync(f.full, uniqueDest(processed, f.name)); } catch {}
+          P.seen.delete(f.full);
+        }
+        P.waiting = Math.max(0, P.waiting - chunk.length);
+        stats.uploaded += chunk.length;
+        stats.lastUpload = new Date().toLocaleString();
+        if (g.scanner) {
+          const feed = P.feeds.get(g.key);
+          if (feed) { feed.sent += chunk.length; feed.sentAt = Date.now(); }
+        } else {
+          log(`Sent “${chunk[0].name}” — it'll be filed in a minute or two.`, "ok");
+        }
+        pingSoon();
+        pushState();
+      }
+    }
+  }
+
+  // A feed that's all sent and hasn't grown for a minute is complete on the server.
+  for (const [key, feed] of P.feeds) {
+    const g = groups.get(key);
+    if (g && g.files.length) continue;
+    if (now - Math.max(feed.lastNewAt, feed.sentAt || 0) < FEED_QUIET_MS) continue;
+    if (feed.sent > 0) {
+      const cap = feed.desc.charAt(0).toUpperCase() + feed.desc.slice(1);
+      log(`${cap} (${plural(feed.sent, "page")}) sent — it'll be filed in a minute or two.`, "ok");
+    }
+    P.feeds.delete(key);
+  }
+
+  if (P.waiting !== prevWaiting) pushState();
+}
+
+/** Called every few seconds whatever else is happening: the 5-minute check-in,
+ *  plus one shortly after uploads and failures. */
+function personalTick() {
+  if (config.accountType !== "personal" || !config.ingestToken) return;
+  const now = Date.now();
+  if ((P.pingAt && now >= P.pingAt) || now - P.lastPing >= PING_MS) pingPersonal();
 }
 
 async function uploadFile(filePath, folder) {
@@ -429,6 +812,7 @@ function startWatching() {
   loop();
   pushState();
   updateTray();
+  if (config.accountType === "personal") pingSoon();
 }
 
 function stopWatching() {
@@ -438,6 +822,7 @@ function stopWatching() {
   log("Stopped watching.");
   pushState();
   updateTray();
+  if (config.accountType === "personal") pingSoon();
 }
 
 // ---- Window + tray ---------------------------------------------------------
@@ -551,6 +936,15 @@ ipcMain.handle("refresh-categories", async () => { await refreshCategories(); pu
 ipcMain.handle("start-watch", async () => { await refreshCategories(); startWatching(); return currentState(); });
 ipcMain.handle("stop-watch", () => { stopWatching(); return currentState(); });
 ipcMain.handle("open-external", (_e, url) => shell.openExternal(url));
+ipcMain.handle("retry-failed", () => {
+  if (config.accountType !== "personal" || !config.watchDir) return currentState();
+  const n = retryFailed(config.watchDir, false);
+  P.failed = failedFiles(config.watchDir).length;
+  log(n ? `Moved ${plural(n, "page")} back — sending ${n === 1 ? "it" : "them"} again.` : "There was nothing to retry.", n ? "ok" : "info");
+  pingSoon();
+  pushState();
+  return currentState();
+});
 
 // ---- App lifecycle ---------------------------------------------------------
 const gotLock = app.requestSingleInstanceLock();
@@ -567,6 +961,8 @@ if (!gotLock) {
     createTray();
     // Resume watching automatically if it was configured before.
     if (config.ingestToken && config.watchDir) startWatching();
+    // Honest Archive Personal check-ins (every 5 minutes, and soon after uploads).
+    setInterval(personalTick, 5000);
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else if (mainWindow) mainWindow.show();

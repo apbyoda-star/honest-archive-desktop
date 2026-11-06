@@ -20,6 +20,7 @@ function renderFolders(state) {
   const personal = state.accountType === "personal";
   if ($("personalHelp")) $("personalHelp").hidden = !personal;
   if ($("shopFolderHelp")) $("shopFolderHelp").hidden = personal;
+  if ($("shopReqs")) $("shopReqs").hidden = personal;
   if (!state.watchDir) { wrap.hidden = true; return; }
   wrap.hidden = false;
 
@@ -53,7 +54,7 @@ function render(state) {
   const acct = $("account");
   if (state.signedIn) {
     acct.innerHTML =
-      `<span>${state.shopName || state.email || ""}</span> · <a id="logoutLink">Sign out</a>`;
+      `<span>${escapeHtml(state.shopName || state.email || "")}</span> · <a id="logoutLink">Sign out</a>`;
     const l = $("logoutLink");
     if (l) l.onclick = async () => render(await window.ha.logout());
     show("main");
@@ -81,6 +82,27 @@ function render(state) {
     ? (state.accountType === "personal" ? "Watching for new scans…" : "Watching for new invoices…")
     : canWatch ? "Idle — press Start" : "Choose a folder to begin";
 
+  // Honest Archive Personal: an attention state when pages are stuck.
+  const p = state.personal;
+  const retry = $("retryBtn");
+  if (retry) retry.hidden = !(p && p.failed > 0);
+  if (p && state.scanning) {
+    const waiting = p.waiting > 0
+      ? ` ${p.waiting} page${p.waiting === 1 ? " is" : "s are"} waiting safely in the folder.` : "";
+    if (p.failed > 0) {
+      $("dot").className = "dot attention";
+      $("statusText").textContent = p.problem || `${p.failed} page${p.failed === 1 ? "" : "s"} couldn't be sent.`;
+    } else if (p.trouble === "account") {
+      $("dot").className = "dot attention";
+      $("statusText").textContent = p.problem || "Honest Archive didn't accept this computer's sign-in.";
+    } else if (p.trouble) {
+      $("dot").className = "dot offline";
+      $("statusText").textContent = (p.trouble === "offline"
+        ? "Can't reach Honest Archive — will keep trying."
+        : "Honest Archive is having trouble — will keep trying.") + waiting;
+    }
+  }
+
   // Stats
   $("sUploaded").textContent = state.stats.uploaded;
   $("sFailed").textContent = state.stats.failed;
@@ -91,7 +113,11 @@ function addLog({ line, level, time }) {
   const body = $("logBody");
   const el = document.createElement("div");
   el.className = "log-line " + (level || "info");
-  el.innerHTML = `<span class="t">${time}</span>${line}`;
+  const t = document.createElement("span");
+  t.className = "t";
+  t.textContent = time || "";
+  el.appendChild(t);
+  el.appendChild(document.createTextNode(String(line == null ? "" : line)));
   body.appendChild(el);
   body.scrollTop = body.scrollHeight;
   while (body.childElementCount > 200) body.removeChild(body.firstChild);
@@ -122,6 +148,11 @@ $("loginBtn").onclick = async () => {
 $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loginBtn").click(); });
 
 $("pickBtn").onclick = async () => render(await window.ha.pickFolder());
+$("retryBtn").onclick = async () => {
+  const btn = $("retryBtn");
+  btn.disabled = true;
+  try { render(await window.ha.retryFailed()); } finally { btn.disabled = false; }
+};
 $("toggleBtn").onclick = async () => {
   const st = await window.ha.getState();
   render(st.scanning ? await window.ha.stopWatch() : await window.ha.startWatch());
