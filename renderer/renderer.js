@@ -17,6 +17,9 @@ function renderFolders(state) {
   const list = $("folderStatus");
   if (!wrap || !list) return;
   const folders = state.folders || [];
+  const personal = state.accountType === "personal";
+  if ($("personalHelp")) $("personalHelp").hidden = !personal;
+  if ($("shopFolderHelp")) $("shopFolderHelp").hidden = personal;
   if (!state.watchDir) { wrap.hidden = true; return; }
   wrap.hidden = false;
 
@@ -75,7 +78,7 @@ function render(state) {
 
   $("dot").className = "dot " + (state.scanning ? "watching" : "idle");
   $("statusText").textContent = state.scanning
-    ? "Watching for new invoices…"
+    ? (state.accountType === "personal" ? "Watching for new scans…" : "Watching for new invoices…")
     : canWatch ? "Idle — press Start" : "Choose a folder to begin";
 
   // Stats

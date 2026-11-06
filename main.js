@@ -58,8 +58,9 @@ function currentState() {
     watchDir: config.watchDir || "",
     scanning,
     stats,
-    folders: folderStatuses(),
+    folders: config.accountType === "personal" ? [] : folderStatuses(),
     privateDocsEnabled,
+    accountType: config.accountType || "shop",
   };
 }
 
@@ -100,7 +101,7 @@ function folderStatuses() {
 }
 
 async function refreshCategories() {
-  if (!config.ingestToken) return;
+  if (!config.ingestToken || config.accountType === "personal") return;
   const base = (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
   try {
     const res = await fetch(base + "/api/v1/invoices/scan-categories", {
@@ -134,7 +135,132 @@ async function apiLogin(apiBase, email, password) {
   const stBody = await st.json().catch(() => ({}));
   if (!st.ok || !stBody.ingest_token) throw new Error("Signed in, but couldn't load your shop key.");
 
-  return { base, ingestToken: stBody.ingest_token, shopName: stBody.shop_name || "", user: body.user };
+  return {
+    base,
+    ingestToken: stBody.ingest_token,
+    shopName: stBody.shop_name || (body.user && body.user.account_type === "personal" ? "your archive" : ""),
+    accountType: (body.user && body.user.account_type) || "shop",
+    user: body.user,
+  };
+}
+
+// ---- Honest Archive Personal: whole scanner feeds, not single files ---------
+//
+// A Brother ADS-3100 saves every page as its own PDF, named after the moment the
+// feed started plus the page's position in it:
+//     Scan2026-11-03_094512_001.pdf, Scan2026-11-03_094512_002.pdf, ...
+// Pages of one paper document are therefore split across files, and only the
+// whole feed, in order, tells the server where one document ends and the next
+// begins. So Personal accounts upload a FEED at a time: wait until no new page
+// has appeared for SETTLE_MS (the scanner has stopped), then send every page of
+// that feed in one batch with its key.
+const BROTHER_RE = /^(.+?)_(\d{3,4})\.(pdf|jpe?g|png|tiff?|bmp)$/i;
+const SETTLE_MS = 20000;
+const PAGES_PER_REQUEST = 25;
+
+function batchKeyFor(name) {
+  const m = BROTHER_RE.exec(name);
+  return m ? { key: m[1], seq: parseInt(m[2], 10) } : null;
+}
+
+async function uploadPersonalBatch(key, files, isScannerFeed) {
+  const base = (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
+  for (let i = 0; i < files.length; i += PAGES_PER_REQUEST) {
+    const chunk = files.slice(i, i + PAGES_PER_REQUEST);
+    const last = i + PAGES_PER_REQUEST >= files.length;
+    const form = new FormData();
+    for (const f of chunk) form.append("files", new Blob([fs.readFileSync(f.full)]), f.name);
+    // Loose files (not a Brother feed) still go up together as one batch, under a
+    // key of our own so a retry lands in the same batch instead of duplicating.
+    form.append("batch_key", isScannerFeed ? key : key);
+    form.append("complete", last ? "true" : "false");
+    const res = await fetch(base + "/api/v1/personal/scans", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + config.ingestToken },
+      body: form,
+    });
+    if (!res.ok) {
+      let detail = "HTTP " + res.status;
+      try {
+        const b = await res.json();
+        if (b && b.detail) detail = typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail);
+      } catch {}
+      throw new Error(detail);
+    }
+  }
+}
+
+async function scanPersonal(root) {
+  const processed = path.join(root, "processed");
+  const failed = path.join(root, "failed");
+  try {
+    fs.mkdirSync(processed, { recursive: true });
+    fs.mkdirSync(failed, { recursive: true });
+  } catch {}
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root);
+  } catch {
+    return;
+  }
+  const groups = new Map(); // key -> {files:[{name,full,seq,size,mtime}], scanner}
+  for (const name of entries) {
+    if (name.startsWith(".")) continue;
+    if (!SUPPORTED.includes(path.extname(name).toLowerCase())) continue;
+    const full = path.join(root, name);
+    let st;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (!st.isFile() || st.size === 0) continue;
+    const b = batchKeyFor(name);
+    const key = b ? b.key : "file-" + path.basename(name, path.extname(name)).slice(0, 60) + "-" + Math.round(st.mtimeMs);
+    if (!groups.has(key)) groups.set(key, { files: [], scanner: Boolean(b) });
+    groups.get(key).files.push({ name, full, seq: b ? b.seq : 0, size: st.size, mtime: st.mtimeMs });
+  }
+  const now = Date.now();
+  for (const [key, g] of groups) {
+    const newest = Math.max(...g.files.map((f) => f.mtime));
+    if (now - newest < SETTLE_MS) {
+      log(`Waiting for the scanner to finish (${g.files.length} page${g.files.length === 1 ? "" : "s"} so far)…`);
+      continue;
+    }
+    // Size-stable check across the whole feed.
+    await new Promise((r) => setTimeout(r, 800));
+    let stable = true;
+    for (const f of g.files) {
+      try {
+        if (fs.statSync(f.full).size !== f.size) stable = false;
+      } catch {
+        stable = false;
+      }
+    }
+    if (!stable) continue;
+    g.files.sort((a, b) => a.seq - b.seq || a.name.localeCompare(b.name));
+    const n = g.files.length;
+    log(`Uploading ${n} page${n === 1 ? "" : "s"} (${key}) …`);
+    try {
+      await uploadPersonalBatch(key, g.files, g.scanner);
+      for (const f of g.files) {
+        try { fs.renameSync(f.full, uniqueDest(processed, f.name)); } catch {}
+      }
+      stats.uploaded += n;
+      stats.lastUpload = new Date().toLocaleString();
+      log(`Sent ${n} page${n === 1 ? "" : "s"} — they'll be filed in a minute or two.`, "ok");
+    } catch (e) {
+      stats.failed += n;
+      for (const f of g.files) {
+        try {
+          if (fs.existsSync(f.full)) fs.renameSync(f.full, uniqueDest(failed, f.name));
+        } catch {}
+      }
+      try { fs.writeFileSync(path.join(failed, key + ".error.txt"), String(e.message || e)); } catch {}
+      log(`Couldn't send ${key}: ${e.message || e}`, "error");
+    }
+    pushState();
+  }
 }
 
 async function uploadFile(filePath, folder) {
@@ -208,8 +334,12 @@ async function scanOnce() {
   if (scanInProgress || !config.watchDir || !config.ingestToken) return;
   scanInProgress = true;
   try {
-    for (const target of watchTargets(config.watchDir)) {
-      await scanFolder(target.dir, target.folder);
+    if (config.accountType === "personal") {
+      await scanPersonal(config.watchDir);
+    } else {
+      for (const target of watchTargets(config.watchDir)) {
+        await scanFolder(target.dir, target.folder);
+      }
     }
   } finally {
     scanInProgress = false;
@@ -385,6 +515,7 @@ ipcMain.handle("login", async (_e, { apiBase, email, password }) => {
   config.apiBase = r.base;
   config.ingestToken = r.ingestToken;
   config.shopName = r.shopName;
+  config.accountType = r.accountType;
   config.email = email;
   saveConfig(config);
   log("Signed in as " + email + (r.shopName ? " (" + r.shopName + ")" : ""), "ok");
