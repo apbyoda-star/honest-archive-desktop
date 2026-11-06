@@ -215,6 +215,7 @@ const P = {
   failed: 0,              // unique pages in failed/
   retryable: 0,           // ...of which "Retry failed scans" can usefully send again
   oneByOne: new Set(),    // feed keys whose pages go up singly (a multi-page request was refused whole)
+  finished: new Set(),    // feed keys already reported as sent this session (more pages = "the rest of")
   lastPing: 0,
   pingAt: 0,              // a ping is due at this time (after uploads/failures)
   lastAutoRetry: 0,
@@ -555,6 +556,19 @@ function personalProblem(withCount) {
   return null;
 }
 
+/** The check-in the website shows on Home and Scans. `retryable` tells it whether
+ *  "Retry failed scans" can help the failed pages (false: they have to be scanned
+ *  again), or null when nothing has failed. */
+function pingBody() {
+  return JSON.stringify({
+    version: appVersion(),
+    waiting: P.waiting,
+    failed: P.failed,
+    retryable: P.failed > 0 ? P.retryable > 0 : null,
+    message: personalProblem(),
+  });
+}
+
 async function pingPersonal() {
   if (config.accountType !== "personal" || !config.ingestToken) return;
   P.lastPing = Date.now();
@@ -567,12 +581,7 @@ async function pingPersonal() {
     await personalFetch("/api/v1/personal/scanner/ping", {
       method: "POST",
       headers: { Authorization: "Bearer " + config.ingestToken, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        version: appVersion(),
-        waiting: P.waiting,
-        failed: P.failed,
-        message: personalProblem(),
-      }),
+      body: pingBody(),
     }, PING_TIMEOUT_MS);
     // The server answered, so if we were waiting out a "can't reach", try now.
     if (P.block && P.block.kind === "offline") P.block.nextAt = 0;
@@ -600,6 +609,8 @@ function failPages(root, g, bad, reason, kind, detail) {
     : "It's in the “failed” folder.";
   log(`Couldn't send ${what}: ${reason} ${where}`, "error");
   refreshFailedCounts(root);
+  // Those pages aren't waiting any more — they're in failed/.
+  P.waiting = personalInbox(root).length;
 }
 
 async function scanPersonal(root) {
@@ -644,7 +655,11 @@ async function scanPersonal(root) {
     g.files.sort((a, b) => a.seq - b.seq || a.name.localeCompare(b.name));
     let feed = P.feeds.get(g.key);
     if (!feed) {
-      feed = { desc: describeFeed(g.key, g.files[0].name), total: 0, sent: 0, lastNewAt: now };
+      // Pages of a feed that already finished earlier (a jam cleared, a retry):
+      // say "the rest of the scan from …" so it doesn't read like a new scan.
+      const desc = describeFeed(g.key, g.files[0].name);
+      feed = { desc: P.finished.has(g.key) ? (desc.startsWith("scan") ? "the rest of the " : "the rest of ") + desc : desc,
+               total: 0, sent: 0, lastNewAt: now };
       P.feeds.set(g.key, feed);
     }
     const total = feed.sent + g.files.length;
@@ -704,7 +719,13 @@ async function scanPersonal(root) {
             } else {
               failPages(root, g, chunk, e.message, kind, e.detail);
             }
-            noteConnected();
+            if (e.status === 404) {
+              // Something answered, but not Honest Archive (wrong address): that's
+              // not "connected again". The failure line already says what to do.
+              P.trouble = null;
+            } else {
+              noteConnected();
+            }
             pingSoon();
             pushState();
             continue outer;
@@ -730,7 +751,6 @@ async function scanPersonal(root) {
         // with their reason; everything else it took.
         P.block = null;
         P.groupBackoff.delete(g.key);
-        noteConnected();
         const skipped = new Map();
         for (const sk of (reply && Array.isArray(reply.skipped) ? reply.skipped : [])) {
           if (sk && sk.name) skipped.set(String(sk.name), String(sk.reason || ""));
@@ -753,7 +773,9 @@ async function scanPersonal(root) {
           try { fs.renameSync(f.full, uniqueDest(processed, f.name)); } catch {}
           P.seen.delete(f.full);
         }
-        P.waiting = Math.max(0, P.waiting - chunk.length);
+        // Count what's still waiting AFTER the pages moved, then say we're back.
+        P.waiting = personalInbox(root).length;
+        noteConnected();
         if (good.length) {
           stats.uploaded += good.length;
           stats.lastUpload = new Date().toLocaleString();
@@ -788,6 +810,7 @@ async function scanPersonal(root) {
     } else if (feed.repeats > 0) {
       log(`${cap}: ${feed.repeats === 1 ? "that page was" : "those pages were"} already sent earlier — nothing new to file.`, "ok");
     }
+    if (feed.sent > 0 || feed.repeats > 0) P.finished.add(key);
     P.feeds.delete(key);
   }
   for (const key of P.oneByOne) if (!groups.has(key)) P.oneByOne.delete(key);
@@ -1107,23 +1130,30 @@ ipcMain.handle("set-server", async (_e, raw) => {
   } catch {
     return { ok: false, message: "That doesn't look like a web address — it should look like https://example.com.", state: currentState() };
   }
-  const changed = addr !== apiBaseUrl();
-  config.apiBase = addr;
-  saveConfig(config);
-  if (changed) log("Server address changed to " + addr, "info");
+  const personal = config.accountType === "personal";
+  const previous = apiBaseUrl();
+  const changed = addr !== previous;
+  if (!personal) {
+    // Shops: unchanged behaviour (save, then check).
+    config.apiBase = addr;
+    saveConfig(config);
+    if (changed) log("Server address changed to " + addr, "info");
+  }
 
   let ok = false;
   let message;
   try {
-    const res = await personalFetch(config.accountType === "personal" ? "/api/v1/personal/scanner/ping" : "/api/v1/invoices/scan-categories",
-      config.accountType === "personal"
+    // Personal: check the NEW address before saving it, so a typo never replaces
+    // an address that works.
+    const res = await personalFetch(personal ? "/api/v1/personal/scanner/ping" : "/api/v1/invoices/scan-categories",
+      personal
         ? {
             method: "POST",
             headers: { Authorization: "Bearer " + config.ingestToken, "Content-Type": "application/json" },
-            body: JSON.stringify({ version: appVersion(), waiting: P.waiting, failed: P.failed, message: personalProblem() }),
+            body: pingBody(),
           }
         : { headers: { Authorization: "Bearer " + config.ingestToken } },
-      PING_TIMEOUT_MS);
+      PING_TIMEOUT_MS, personal ? addr : undefined);
     // Something else (a website that redirects every path to a page) can answer
     // 200 too; only Honest Archive answers with this.
     const body = await res.json().catch(() => null);
@@ -1142,8 +1172,16 @@ ipcMain.handle("set-server", async (_e, raw) => {
     } else if (e instanceof SendError && e.kind === "account") {
       message = e.message;
     } else {
-      message = `Honest Archive at ${addr} is having trouble right now — the Scan Client will keep trying.`;
+      message = personal
+        ? `Honest Archive at ${addr} is having trouble right now. Try again in a few minutes.`
+        : `Honest Archive at ${addr} is having trouble right now — the Scan Client will keep trying.`;
     }
+    if (personal) message += ` The address is still ${previous}.`;
+  }
+  if (ok && personal) {
+    config.apiBase = addr;
+    saveConfig(config);
+    if (changed) log("Server address changed to " + addr, "info");
   }
   if (ok) {
     // Everything that was waiting on the address goes now.

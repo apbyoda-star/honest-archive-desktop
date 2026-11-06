@@ -84,7 +84,7 @@ function render(state) {
   // Configure
   $("watchDir").textContent = state.watchDir || "No folder chosen yet";
   $("dirSub").textContent = state.watchDir
-    ? "Directory configured for scans"
+    ? (state.accountType === "personal" ? "Your scanner's folder is set" : "Directory configured for scans")
     : "Choose the folder your scanner saves to";
 
   renderFolders(state);
@@ -126,6 +126,12 @@ function render(state) {
   $("sUploaded").textContent = state.stats.uploaded;
   $("sFailed").textContent = state.stats.failed;
   $("sLast").textContent = state.stats.lastUpload || "—";
+  const note = $("statsNote");
+  if (note) {
+    note.textContent = state.accountType === "personal"
+      ? "Uploaded counts this session; Failed is what's in the failed folder now. Full history lives in the Honest Archive web app."
+      : "Counts are for this session. Full history lives in the Honest Archive web app.";
+  }
 }
 
 function addLog({ line, level, time }) {
@@ -183,7 +189,9 @@ function serverEditing(on) {
   }
 }
 $("serverChange").onclick = () => { serverMsg(""); serverEditing(true); };
-$("serverCancel").onclick = () => serverEditing(false);
+// The address is only saved when the check passes, so Cancel just closes the
+// editor — the address shown is still the one in use.
+$("serverCancel").onclick = () => { serverMsg(""); serverEditing(false); };
 $("serverSave").onclick = async () => {
   const btn = $("serverSave");
   btn.disabled = true;
@@ -203,7 +211,7 @@ $("serverSave").onclick = async () => {
 };
 $("serverInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("serverSave").click();
-  if (e.key === "Escape") serverEditing(false);
+  if (e.key === "Escape") $("serverCancel").click();
 });
 
 $("pickBtn").onclick = async () => render(await window.ha.pickFolder());
