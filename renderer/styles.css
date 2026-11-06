@@ -141,3 +141,7 @@ button.ghost:hover { border-color: var(--navy); }
 .server-msg.bad { color: var(--rose); }
 .server-msg.good { color: var(--emerald); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.failed-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: -8px 0 18px; padding: 10px 16px; background: #fdf3f2; border: 1px solid #f1d2d0; border-radius: 14px; }
+.failed-actions .spacer { flex: 1; }
+.failed-hint { color: var(--ink-2); font-size: 13px; line-height: 1.45; min-width: 0; }
+.failed-actions button { flex: none; }

@@ -105,6 +105,15 @@ function render(state) {
   // Only when a retry can help: a page Honest Archive couldn't read would just
   // fail again, so it doesn't get a button that loops.
   if (retry) retry.hidden = !(p && p.retryable > 0);
+  const fa = $("failedActions");
+  if (fa) {
+    const unreadable = p ? p.failed - p.retryable : 0;
+    fa.hidden = !(p && p.failed > 0);
+    $("clearFailedBtn").hidden = !(unreadable > 0);
+    $("failedHint").textContent = unreadable > 0
+      ? "Once you've scanned those papers again, press “Clear these” — they're moved to failed/cleared, nothing is deleted."
+      : "The pages that couldn't be sent are in the “failed” folder.";
+  }
   if (p && state.scanning) {
     const waiting = p.waiting > 0
       ? ` ${p.waiting} page${p.waiting === 1 ? " is" : "s are"} waiting safely in the folder.` : "";
@@ -220,6 +229,12 @@ $("retryBtn").onclick = async () => {
   btn.disabled = true;
   try { render(await window.ha.retryFailed()); } finally { btn.disabled = false; }
 };
+$("clearFailedBtn").onclick = async () => {
+  const btn = $("clearFailedBtn");
+  btn.disabled = true;
+  try { render(await window.ha.clearFailed()); } finally { btn.disabled = false; }
+};
+$("openFailedBtn").onclick = async () => render(await window.ha.openFailedFolder());
 $("toggleBtn").onclick = async () => {
   const st = await window.ha.getState();
   render(st.scanning ? await window.ha.stopWatch() : await window.ha.startWatch());

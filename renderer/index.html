@@ -85,6 +85,16 @@
         <button id="toggleBtn" class="primary" disabled>Start watching</button>
       </div>
 
+      <!-- Honest Archive Personal: pages in the failed folder. "Clear these" is
+           for pages that can't be read, once the paper has been scanned again —
+           it moves them to failed/cleared (nothing is deleted). -->
+      <div class="failed-actions" id="failedActions" hidden>
+        <span id="failedHint" class="failed-hint"></span>
+        <div class="spacer"></div>
+        <button id="openFailedBtn" class="ghost" type="button">Open failed folder</button>
+        <button id="clearFailedBtn" class="ghost" type="button" hidden>Clear these</button>
+      </div>
+
       <!-- Subfolders are the filing mechanism, so it has to be explained where the
            folder is chosen, not buried in a README nobody opens — and the live
            status below is the only way to know a folder is spelled right BEFORE

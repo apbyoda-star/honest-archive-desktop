@@ -53,7 +53,7 @@ function currentState() {
   return {
     signedIn: Boolean(config.ingestToken),
     apiBase: config.apiBase || DEFAULT_API_BASE,
-    shopName: config.shopName || "",
+    shopName: accountName(),
     email: config.email || "",
     watchDir: config.watchDir || "",
     scanning,
@@ -73,6 +73,14 @@ function currentState() {
       problem: P.trouble || P.failed ? personalProblem(true) : null,
     } : null,
   };
+}
+
+/** What the window's header calls the account. Personal: the archive's own name
+ *  ("Walter Henderson's Archive"), never the old "your archive" placeholder. */
+function accountName() {
+  const name = config.shopName || "";
+  if (config.accountType === "personal" && (!name || /^your archive$/i.test(name))) return config.email || "";
+  return name;
 }
 
 /** Normalise a folder name the same way the server does, so what the client shows
@@ -171,7 +179,8 @@ async function apiLogin(apiBase, email, password) {
   return {
     base,
     ingestToken: stBody.ingest_token,
-    shopName: stBody.shop_name || (body.user && body.user.account_type === "personal" ? "your archive" : ""),
+    shopName: stBody.shop_name
+      || (personal && body.user && body.user.full_name ? `${body.user.full_name}'s Archive` : ""),
     accountType: (body.user && body.user.account_type) || "shop",
     user: body.user,
   };
@@ -216,6 +225,7 @@ const P = {
   retryable: 0,           // ...of which "Retry failed scans" can usefully send again
   oneByOne: new Set(),    // feed keys whose pages go up singly (a multi-page request was refused whole)
   finished: new Set(),    // feed keys already reported as sent this session (more pages = "the rest of")
+  addressLogged: new Set(),// feed keys already reported as failing because of the server address
   lastPing: 0,
   pingAt: 0,              // a ping is due at this time (after uploads/failures)
   lastAutoRetry: 0,
@@ -310,10 +320,62 @@ async function sendPages(key, files, complete) {
 // own wording goes in the .error.txt as detail; this is the headline.
 const NOT_READABLE = "This page can't be read — scan it again.";
 const TOO_BIG = "This page is too big to send — scan it again at a lower resolution.";
-const ADDRESS_WRONG = "Honest Archive didn't recognise this upload — check the server address in the Scan Client, then press “Retry failed scans”.";
+const ADDRESS_WRONG = "Honest Archive didn't recognize this upload — the server address looks wrong. Fix it above (Change); the pages are sent again as soon as it's right.";
+// The same problem as the website shows it (the person reading it isn't at the
+// scanner computer, so "above" means nothing there).
+const ADDRESS_WRONG_SITE = "The server address on the scanner computer looks wrong — fix it in the Scan Client there (Change, next to the address).";
 
 function plainSkipReason(serverReason) {
   return /MB|too big|too large/i.test(serverReason || "") ? TOO_BIG : NOT_READABLE;
+}
+
+/** The headline for n pages: "This page can't…" vs "These pages can't…". */
+function pluralReason(reason, n) {
+  if (n <= 1) return reason;
+  if (reason === NOT_READABLE) return "These pages can't be read — scan them again.";
+  if (reason === TOO_BIG) return "These pages are too big to send — scan them again at a lower resolution.";
+  return reason;
+}
+
+/** "2–3", "2, 4 and 7", "2–3 and 6" for sorted unique page numbers. */
+function pageRanges(nums) {
+  const runs = [];
+  for (const n of nums) {
+    const last = runs[runs.length - 1];
+    if (last && n === last[1] + 1) last[1] = n;
+    else runs.push([n, n]);
+  }
+  const parts = runs.map(([a, b]) => (a === b ? String(a) : `${a}–${b}`));
+  return parts.length > 1 ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1] : parts[0];
+}
+
+/**
+ * Which papers these failed pages belong to, in words a person can act on:
+ * "Pages 2–3 of the scan from Nov 4, 4:40 PM", "“receipt photo.jpg”".
+ * Returns { text, papers } (papers = how many separate scans/files), or null.
+ */
+function describeFailedPages(names) {
+  const feeds = new Map();
+  const loose = [];
+  for (const raw of names) {
+    const name = originalName(raw);
+    const b = batchKeyFor(name);
+    if (!b) { if (!loose.includes(name)) loose.push(name); continue; }
+    if (!feeds.has(b.key)) feeds.set(b.key, { key: b.key, first: name, seqs: new Set() });
+    feeds.get(b.key).seqs.add(b.seq);
+  }
+  const parts = [];
+  for (const f of [...feeds.values()].sort((a, b) => a.key.localeCompare(b.key))) {
+    const seqs = [...f.seqs].sort((a, b) => a - b);
+    parts.push(`${seqs.length === 1 ? "page" : "pages"} ${pageRanges(seqs)} of the ${describeFeed(f.key, f.first)}`);
+  }
+  for (const n of loose) parts.push(`“${n}”`);
+  if (!parts.length) return null;
+  const MAX = 2;
+  let text;
+  if (parts.length <= MAX) text = parts.join(" and ");
+  else text = parts.slice(0, MAX).join(", ") + ` and ${plural(parts.length - MAX, "more paper")}`;
+  return { text: text.charAt(0).toUpperCase() + text.slice(1), papers: parts.length };
 }
 
 /** Per-file reasons from a 422 "Nothing we could use — “a.pdf”: reason; “b.pdf”: reason." */
@@ -421,20 +483,39 @@ function recordRejected(root, label, files, reason, kind, detail) {
   if (!moved.length) return;
   const safeLabel = String(label).replace(/[^\w.\- ]+/g, "_").slice(0, 80);
   let errPath = path.join(failedDir, safeLabel + ".error.txt");
-  if (fs.existsSync(errPath)) errPath = path.join(failedDir, `${safeLabel}_${Date.now()}.error.txt`);
+  // More pages of the same feed failing the same way (pages become ready one poll
+  // at a time) join the feed's existing record, so a 30-page feed sent to a wrong
+  // address is one record, not 30.
+  let allFiles = moved;
+  let details = detail ? [detail] : [];
+  if (fs.existsSync(errPath)) {
+    let prev = "";
+    try { prev = fs.readFileSync(errPath, "utf-8"); } catch {}
+    const pk = /^Kind: (\w+)/m.exec(prev);
+    const pr = /^Couldn't send: (.*)$/m.exec(prev);
+    const pf = /^Files: (.*)$/m.exec(prev);
+    const pd = /^Honest Archive said: (.*)$/m.exec(prev);
+    if (pk && pk[1] === kind && pr && [reason, pluralReason(reason, 2)].includes(pr[1].trim()) && pf) {
+      const old = pf[1].split(",").map((x) => x.trim()).filter(Boolean);
+      allFiles = [...old, ...moved.filter((m) => !old.includes(m))];
+      if (pd && pd[1].trim() && !details.includes(pd[1].trim())) details = [pd[1].trim(), ...details];
+    } else {
+      errPath = path.join(failedDir, `${safeLabel}_${Date.now()}.error.txt`);
+    }
+  }
   try {
     fs.writeFileSync(errPath, [
-      "Couldn't send: " + reason,
+      "Couldn't send: " + pluralReason(reason, allFiles.length),
       "When: " + new Date().toLocaleString(),
-      "Files: " + moved.join(", "),
+      "Files: " + allFiles.join(", "),
       "Kind: " + kind,
       "Retryable: " + (kind === "unreadable" ? "no" : "yes"),
-      ...(detail ? ["Honest Archive said: " + detail] : []),
+      ...(details.length ? ["Honest Archive said: " + details.join("; ")] : []),
       "",
       kind === "unreadable"
-        ? "Retrying won't help — Honest Archive can't use this file. Scan the paper again; once it's in, you can delete the file here."
+        ? "Retrying won't help — Honest Archive can't use this file. Scan the paper again, then press “Clear these” in the Scan Client (or delete the file here)."
         : kind === "address"
-          ? "Check the server address in the Scan Client (Change, next to the address), then press “Retry failed scans”."
+          ? "Fix the server address in the Scan Client window (Change, next to the address). These pages are sent again automatically once it's right."
           : "Fix the file (or scan it again) and press “Retry failed scans” in the Scan Client.",
       "",
     ].join("\n"));
@@ -520,6 +601,7 @@ function retryFailed(root, which) {
   }
   if (moved) {
     P.lastReject = "";
+    P.addressLogged.clear();
     P.groupBackoff.clear();
     if (P.block) P.block.nextAt = 0;
   }
@@ -535,23 +617,39 @@ function personalProblem(withCount) {
   if (P.trouble === "offline") return "The scanner computer can't reach Honest Archive — it will keep trying.";
   if (P.trouble === "server") return "Honest Archive had trouble receiving scans — the Scan Client keeps trying.";
   if (P.failed > 0) {
-    let reason = "";
+    const root = config.watchDir || "";
+    const records = failedRecords(root);
+    const head = withCount ? `${plural(P.failed, "page")} couldn't be sent. ` : "";
+    let retryReason = "";
     if (P.retryable > 0) {
       // The newest reason among pages a retry can help (survives a restart).
       let newest = null;
-      for (const r of failedRecords(config.watchDir || "")) {
+      for (const r of records) {
         if (!r.retryable || !r.reason) continue;
         try {
           const t = fs.statSync(r.record).mtimeMs;
           if (!newest || t > newest.t) newest = { t, reason: r.reason };
         } catch {}
       }
-      reason = newest ? newest.reason : (P.lastReject || "");
-      if (!reason) reason = "Press “Retry failed scans” on the scanner computer.";
-    } else {
-      reason = P.failed === 1 ? NOT_READABLE : "These pages can't be read — scan them again.";
+      retryReason = newest ? newest.reason : (P.lastReject || "");
+      if (!retryReason) retryReason = "Press “Retry failed scans” on the scanner computer.";
+      if (retryReason === ADDRESS_WRONG && !withCount) retryReason = ADDRESS_WRONG_SITE;
     }
-    return withCount ? `${plural(P.failed, "page")} couldn't be sent. ${reason}` : reason;
+    // Pages a retry can't help: say WHICH papers to scan again.
+    let unreadable = "";
+    if (P.failed > P.retryable) {
+      const inFailed = new Set(failedFiles(root));
+      const stuck = new Set();
+      for (const r of records) if (!r.retryable) r.files.forEach((f) => { if (inFailed.has(f)) stuck.add(f); });
+      const d = describeFailedPages([...stuck]);
+      unreadable = d
+        ? `${d.text} can't be read — scan ${d.papers === 1 ? "that paper" : "those papers"} again.`
+        : (P.failed - P.retryable === 1 ? NOT_READABLE : "These pages can't be read — scan them again.");
+    }
+    if (retryReason && unreadable) return `${head}${retryReason} ${unreadable}`;
+    if (retryReason) return head + retryReason;
+    // Only unreadable pages: the sentence names them, so the window needs no count.
+    return unreadable;
   }
   return null;
 }
@@ -600,14 +698,27 @@ function appVersion() {
 
 /** Pages of group g that Honest Archive couldn't use: into failed/, say so once. */
 function failPages(root, g, bad, reason, kind, detail) {
-  recordRejected(root, g.scanner ? g.key : bad[0].name, bad, reason, kind, detail);
-  const what = g.scanner
-    ? `${plural(bad.length, "page")} of the ${describeFeed(g.key, bad[0].name)} (${bad.map((f) => f.name).join(", ")})`
-    : `“${bad[0].name}”`;
-  const where = kind === "unreadable"
-    ? "It's in the “failed” folder — retrying won't help."
-    : "It's in the “failed” folder.";
-  log(`Couldn't send ${what}: ${reason} ${where}`, "error");
+  const label = g.scanner ? g.key : bad[0].name;
+  recordRejected(root, label, bad, reason, kind, detail);
+  if (kind === "address") {
+    // Wrong address: every page of the feed fails the same way as it becomes
+    // ready. Say it once per feed; later pages quietly join the same record.
+    if (!P.addressLogged.has(label)) {
+      P.addressLogged.add(label);
+      const what = g.scanner ? `the ${describeFeed(g.key, bad[0].name)}` : `“${bad[0].name}”`;
+      log(`Couldn't send ${what}: ${reason} Until then its pages wait in the “failed” folder.`, "error");
+    }
+  } else {
+    const n = bad.length;
+    const what = g.scanner
+      ? `${plural(n, "page")} of the ${describeFeed(g.key, bad[0].name)} (${bad.map((f) => f.name).join(", ")})`
+      : `“${bad[0].name}”`;
+    const it = n === 1 ? "It's" : "They're";
+    const where = kind === "unreadable"
+      ? `${it} in the “failed” folder — retrying won't help.`
+      : `${it} in the “failed” folder.`;
+    log(`Couldn't send ${what}: ${pluralReason(reason, n)} ${where}`, "error");
+  }
   refreshFailedCounts(root);
   // Those pages aren't waiting any more — they're in failed/.
   P.waiting = personalInbox(root).length;
@@ -1191,10 +1302,10 @@ ipcMain.handle("set-server", async (_e, raw) => {
     if (config.accountType === "personal" && config.watchDir) {
       const n = retryFailed(config.watchDir, "address");
       refreshFailedCounts(config.watchDir);
-      if (n) {
-        log(`Sending ${plural(n, "page")} again that couldn't be sent because of the server address.`, "ok");
-        message += ` Sending ${plural(n, "page")} again that ${n === 1 ? "was" : "were"} waiting on the address.`;
-      }
+      // The pages just moved back are waiting again (the message below is the
+      // one line that says so).
+      P.waiting = personalInbox(config.watchDir).length;
+      if (n) message += ` Sending ${plural(n, "page")} again that ${n === 1 ? "was" : "were"} waiting on the address.`;
     } else {
       await refreshCategories();
     }
@@ -1205,6 +1316,46 @@ ipcMain.handle("set-server", async (_e, raw) => {
 });
 
 ipcMain.handle("open-external", (_e, url) => shell.openExternal(url));
+/** Pages Honest Archive can't read, after the paper has been scanned again: move
+ *  them (and their notes) to failed/cleared/ so the warning goes away here and,
+ *  with the next check-in, on the website. Nothing is deleted. */
+ipcMain.handle("clear-failed", async () => {
+  if (config.accountType !== "personal" || !config.watchDir) return currentState();
+  const root = config.watchDir;
+  const failedDir = path.join(root, "failed");
+  const clearedDir = path.join(failedDir, "cleared");
+  let n = 0;
+  for (const r of failedRecords(root)) {
+    if (r.retryable) continue;
+    try { fs.mkdirSync(clearedDir, { recursive: true }); } catch {}
+    for (const f of r.files) {
+      const from = path.join(failedDir, f);
+      try {
+        if (!fs.existsSync(from)) continue;
+        fs.renameSync(from, uniqueDest(clearedDir, f));
+        n += 1;
+      } catch {}
+    }
+    try { fs.renameSync(r.record, uniqueDest(clearedDir, path.basename(r.record))); } catch {}
+  }
+  refreshFailedCounts(root);
+  if (n) log(`Cleared ${plural(n, "unreadable page")} — moved to failed/cleared in case you need ${n === 1 ? "it" : "them"}.`, "ok");
+  else log("There were no unreadable pages to clear.", "info");
+  // Tell the website now, so its warning goes away without waiting 5 minutes.
+  await pingPersonal();
+  pushState();
+  return currentState();
+});
+
+ipcMain.handle("open-failed-folder", async () => {
+  if (!config.watchDir) return currentState();
+  const dir = path.join(config.watchDir, "failed");
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  const err = await shell.openPath(dir);
+  if (err) log(`Couldn't open the failed folder: ${err}`, "error");
+  return currentState();
+});
+
 ipcMain.handle("retry-failed", () => {
   if (config.accountType !== "personal" || !config.watchDir) return currentState();
   const n = retryFailed(config.watchDir, "all");
@@ -1212,9 +1363,10 @@ ipcMain.handle("retry-failed", () => {
   if (n) {
     log(`Moved ${plural(n, "page")} back — sending ${n === 1 ? "it" : "them"} again.`, "ok");
   } else if (P.failed > 0) {
-    log(P.failed === 1
+    log((P.failed === 1
       ? "Nothing to retry. " + NOT_READABLE
-      : `Nothing to retry. ${plural(P.failed, "page")} can't be read — scan them again.`, "info");
+      : `Nothing to retry. ${plural(P.failed, "page")} can't be read — scan them again.`)
+      + " Once they're scanned again, press “Clear these”.", "info");
   } else {
     log("There was nothing to retry.", "info");
   }

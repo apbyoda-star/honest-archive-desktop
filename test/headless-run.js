@@ -25,7 +25,7 @@ const electron = {
   Menu: { buildFromTemplate: () => ({}) , setApplicationMenu: noop },
   ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; }, on: noop },
   dialog: { showOpenDialog: async () => ({ canceled: true }) },
-  shell: { openExternal: noop },
+  shell: { openExternal: noop, openPath: async (p) => { console.log("[headless] openPath " + p); return ""; } },
   nativeImage: { createFromPath: () => ({ resize: () => ({}), isEmpty: () => false, setTemplateImage: noop }), createFromDataURL: () => ({ resize: () => ({}), isEmpty: () => false, setTemplateImage: noop }) },
 };
 const orig = Module._load;
@@ -39,7 +39,9 @@ process.stdin.on("data", async (chunk) => {
     // "set-server=http://host:port" passes one argument to the handler.
     const eq = ch.indexOf("=");
     const name = eq > 0 ? ch.slice(0, eq) : ch;
-    const arg = eq > 0 ? ch.slice(eq + 1) : {};
+    let arg = eq > 0 ? ch.slice(eq + 1) : {};
+    // "login={\"email\":…}" passes a JSON object (no spaces).
+    if (typeof arg === "string" && arg.startsWith("{")) { try { arg = JSON.parse(arg); } catch {} }
     if (!handlers[name]) { origLog("[headless] no handler", name); continue; }
     try {
       const r = await handlers[name]({}, arg);
