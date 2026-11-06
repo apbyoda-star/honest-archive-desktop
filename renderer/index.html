@@ -24,7 +24,7 @@
       <h1>Sign in</h1>
       <p class="muted">Connect this computer to your Honest Archive account.</p>
       <label>Email</label>
-      <input id="email" type="email" placeholder="you@yourshop.com" autocomplete="username" />
+      <input id="email" type="email" placeholder="you@example.com" autocomplete="username" />
       <label>Password</label>
       <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
       <details class="advanced">
@@ -58,6 +58,24 @@
         <button id="pickBtn" class="ghost">Browse…</button>
       </div>
 
+      <!-- Server address (Honest Archive Personal). Shown here, not only behind
+           "Advanced" on the sign-in screen, because every "check the server
+           address" message points at it. -->
+      <div class="server-card" id="serverCard" hidden>
+        <div class="server-main">
+          <span class="dir-label">Honest Archive address</span>
+          <span id="serverAddr" class="dir-path"></span>
+        </div>
+        <button id="serverChange" class="linky" type="button">Change</button>
+        <div id="serverEdit" class="server-edit" hidden>
+          <label for="serverInput" class="sr-only">Server address</label>
+          <input id="serverInput" type="text" spellcheck="false" autocomplete="off" />
+          <button id="serverSave" class="primary" type="button">Save and check</button>
+          <button id="serverCancel" class="ghost" type="button">Cancel</button>
+        </div>
+        <p id="serverMsg" class="server-msg" hidden></p>
+      </div>
+
       <!-- Status / start-stop -->
       <div class="statusbar">
         <span id="dot" class="dot idle"></span>
@@ -76,7 +94,7 @@
         <ol>
           <li>Point your scanner at this folder (Brother ADS-3100: set the scan destination to this folder).</li>
           <li>Put the paper in and press the scanner's button. Mixed stacks are fine — bills, letters, statements, all together.</li>
-          <li>When the scanner stops, everything it scanned is sent together and Honest Archive sorts it into documents and folders for you.</li>
+          <li>Pages are sent as they arrive and filed together once the scanner has been quiet for a minute — Honest Archive sorts them into documents and folders for you.</li>
         </ol>
         <p class="muted help-note">The Brother setting that saves <b>one file per page</b> is fine — the pages are put back together in order. Saving into a dated folder inside this one is fine too.</p>
         <p class="muted help-note">If the internet drops or a page jams, nothing is lost: pages wait here and are sent as soon as Honest Archive can be reached.</p>

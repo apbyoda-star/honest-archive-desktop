@@ -4,7 +4,7 @@
 // shipping code, unmodified.
 //   node test/headless-run.js <userDataDir>
 // Type an IPC channel name on stdin (e.g. "retry-failed", "get-state") to call
-// the same handler the window's buttons call.
+// the same handler the window's buttons call; "set-server=<address>" passes an argument.
 const Module = require("module");
 const path = require("path");
 const userData = path.resolve(process.argv[2] || path.join(__dirname, ".userdata"));
@@ -36,10 +36,15 @@ origLog("[headless] scan client started; userData =", userData);
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", async (chunk) => {
   for (const ch of chunk.split(/\s+/).filter(Boolean)) {
-    if (!handlers[ch]) { origLog("[headless] no handler", ch); continue; }
+    // "set-server=http://host:port" passes one argument to the handler.
+    const eq = ch.indexOf("=");
+    const name = eq > 0 ? ch.slice(0, eq) : ch;
+    const arg = eq > 0 ? ch.slice(eq + 1) : {};
+    if (!handlers[name]) { origLog("[headless] no handler", name); continue; }
     try {
-      const r = await handlers[ch]({}, {});
-      origLog(`[headless] ${ch} ->`, JSON.stringify(r && r.personal !== undefined ? { scanning: r.scanning, personal: r.personal, stats: r.stats } : r));
+      const r = await handlers[name]({}, arg);
+      const brief = (x) => (x && x.personal !== undefined ? { scanning: x.scanning, apiBase: x.apiBase, personal: x.personal, stats: x.stats } : x);
+      origLog(`[headless] ${name} ->`, JSON.stringify(r && r.state ? { ok: r.ok, message: r.message, state: brief(r.state) } : brief(r)));
     } catch (e) { origLog(`[headless] ${ch} failed:`, e.message); }
   }
 });

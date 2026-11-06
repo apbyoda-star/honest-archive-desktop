@@ -1,5 +1,15 @@
 const $ = (id) => document.getElementById(id);
 
+/** Errors thrown in the main process reach us as "Error invoking remote method
+ *  'login': Error: <what we said>". Only the last part is meant for people. */
+function friendlyError(e, fallback) {
+  const msg = String((e && e.message) || e || "")
+    .replace(/^Error invoking remote method '[^']*':\s*/, "")
+    .replace(/^(?:[A-Za-z]*Error:\s*)+/, "")
+    .trim();
+  return msg || fallback || "Something went wrong.";
+}
+
 function show(view) {
   $("login").classList.toggle("hidden", view !== "login");
   $("main").classList.toggle("hidden", view !== "main");
@@ -64,6 +74,13 @@ function render(state) {
     if (!$("apiBase").value) $("apiBase").value = state.apiBase || "";
   }
 
+  // Server address (Personal): visible and changeable while signed in.
+  const card = $("serverCard");
+  if (card) {
+    card.hidden = !(state.signedIn && state.accountType === "personal");
+    $("serverAddr").textContent = state.apiBase || "";
+  }
+
   // Configure
   $("watchDir").textContent = state.watchDir || "No folder chosen yet";
   $("dirSub").textContent = state.watchDir
@@ -85,7 +102,9 @@ function render(state) {
   // Honest Archive Personal: an attention state when pages are stuck.
   const p = state.personal;
   const retry = $("retryBtn");
-  if (retry) retry.hidden = !(p && p.failed > 0);
+  // Only when a retry can help: a page Honest Archive couldn't read would just
+  // fail again, so it doesn't get a button that loops.
+  if (retry) retry.hidden = !(p && p.retryable > 0);
   if (p && state.scanning) {
     const waiting = p.waiting > 0
       ? ` ${p.waiting} page${p.waiting === 1 ? " is" : "s are"} waiting safely in the folder.` : "";
@@ -98,7 +117,7 @@ function render(state) {
     } else if (p.trouble) {
       $("dot").className = "dot offline";
       $("statusText").textContent = (p.trouble === "offline"
-        ? "Can't reach Honest Archive — will keep trying."
+        ? `Can't reach Honest Archive at ${state.apiBase} — will keep trying.`
         : "Honest Archive is having trouble — will keep trying.") + waiting;
     }
   }
@@ -138,7 +157,7 @@ $("loginBtn").onclick = async () => {
     });
     render(state);
   } catch (e) {
-    err.textContent = e.message || "Login failed.";
+    err.textContent = friendlyError(e, "Sign-in failed.");
     err.classList.remove("hidden");
   } finally {
     btn.disabled = false;
@@ -146,6 +165,46 @@ $("loginBtn").onclick = async () => {
   }
 };
 $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loginBtn").click(); });
+
+// Server address: Change -> edit -> Save and check.
+function serverMsg(text, ok) {
+  const m = $("serverMsg");
+  m.hidden = !text;
+  m.textContent = text || "";
+  m.className = "server-msg" + (ok === true ? " good" : ok === false ? " bad" : "");
+}
+function serverEditing(on) {
+  $("serverEdit").hidden = !on;
+  $("serverChange").hidden = on;
+  if (on) {
+    $("serverInput").value = $("serverAddr").textContent;
+    $("serverInput").focus();
+    $("serverInput").select();
+  }
+}
+$("serverChange").onclick = () => { serverMsg(""); serverEditing(true); };
+$("serverCancel").onclick = () => serverEditing(false);
+$("serverSave").onclick = async () => {
+  const btn = $("serverSave");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  serverMsg("");
+  try {
+    const r = await window.ha.setServer($("serverInput").value);
+    render(r.state);
+    serverMsg(r.message, r.ok);
+    if (r.ok) serverEditing(false);
+  } catch (e) {
+    serverMsg(friendlyError(e, "Couldn't save the address."), false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save and check";
+  }
+};
+$("serverInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("serverSave").click();
+  if (e.key === "Escape") serverEditing(false);
+});
 
 $("pickBtn").onclick = async () => render(await window.ha.pickFolder());
 $("retryBtn").onclick = async () => {

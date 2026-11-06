@@ -132,3 +132,12 @@ button.ghost:hover { border-color: var(--navy); }
   color: #60a5fa; font-size: 11px; font-weight: 700; text-transform: none; letter-spacing: 0;
 }
 .linky:hover { text-decoration: underline; }
+.server-card { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 18px; margin-top: 10px; }
+.server-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.server-edit { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+.server-edit input { flex: 1; min-width: 220px; background: #fff; border: 1px solid var(--line-2); border-radius: 10px; padding: 9px 12px; color: var(--ink); font-size: 14px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.server-msg { width: 100%; margin: 0; font-size: 14px; color: var(--ink-2); }
+#serverChange { font-size: 14px; color: var(--navy); padding: 6px 4px; }
+.server-msg.bad { color: var(--rose); }
+.server-msg.good { color: var(--emerald); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
