@@ -109,17 +109,24 @@ function render(state) {
   if (retry) retry.hidden = !(p && p.retryable - addressFailed > 0);
   const fa = $("failedActions");
   if (fa) {
-    const unreadable = p ? p.failed - p.retryable : 0;
+    const stuck = p ? p.failed - p.retryable : 0;            // a retry can't help these
+    const unsupported = p ? Math.min(p.unsupported || 0, stuck) : 0; // .HEIC and the like
+    const unreadable = stuck - unsupported;                      // bad scans
     fa.hidden = !(p && p.failed > 0);
-    $("clearFailedBtn").hidden = !(unreadable > 0);
+    $("clearFailedBtn").hidden = !(stuck > 0);
     const ca = $("changeAddrBtn");
     if (ca) ca.hidden = !(addressFailed > 0 && state.accountType === "personal");
     const hints = [];
     if (addressFailed > 0) {
       hints.push(`${addressFailed === 1 ? "1 page is" : addressFailed + " pages are"} waiting on the server address — press “Change address”, fix it and press “Save and check”; they're sent again as soon as it's right.`);
     }
-    if (unreadable > 0) {
+    // The status line above names the pages; this says what to press afterwards.
+    if (unreadable > 0 && unsupported > 0) {
+      hints.push("Once you've scanned the unreadable papers again and saved the other files as JPG or PDF, press “Clear these” — they're moved to failed/cleared, nothing is deleted.");
+    } else if (unreadable > 0) {
       hints.push("Once you've scanned the unreadable papers again, press “Clear these” — they're moved to failed/cleared, nothing is deleted.");
+    } else if (unsupported > 0) {
+      hints.push(`Once you've saved ${unsupported === 1 ? "it" : "them"} as JPG or PDF into this folder, press “Clear these” — the original is moved to failed/cleared, nothing is deleted.`);
     }
     $("failedHint").textContent = hints.length
       ? hints.join(" ")
@@ -128,17 +135,19 @@ function render(state) {
   if (p && state.scanning) {
     const waiting = p.waiting > 0
       ? ` ${p.waiting} page${p.waiting === 1 ? " is" : "s are"} waiting safely in the folder.` : "";
-    if (p.failed > 0) {
-      $("dot").className = "dot attention";
-      $("statusText").textContent = p.problem || `${p.failed} page${p.failed === 1 ? "" : "s"} couldn't be sent.`;
-    } else if (p.trouble === "account") {
+    if (p.trouble === "account") {
       $("dot").className = "dot attention";
       $("statusText").textContent = p.problem || "Honest Archive didn't accept this computer's sign-in.";
     } else if (p.trouble) {
-      $("dot").className = "dot offline";
-      $("statusText").textContent = (p.trouble === "offline"
+      // Can't reach it (or it's having trouble): say the address and what's
+      // waiting — and, from the main process, which pages failed, if any.
+      $("dot").className = p.failed > 0 ? "dot attention" : "dot offline";
+      $("statusText").textContent = p.problem || ((p.trouble === "offline"
         ? `Can't reach Honest Archive at ${state.apiBase} — will keep trying.`
-        : "Honest Archive is having trouble — will keep trying.") + waiting;
+        : "Honest Archive is having trouble — will keep trying.") + waiting);
+    } else if (p.failed > 0) {
+      $("dot").className = "dot attention";
+      $("statusText").textContent = p.problem || `${p.failed} page${p.failed === 1 ? "" : "s"} couldn't be sent.`;
     }
   }
 
