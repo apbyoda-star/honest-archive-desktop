@@ -62,7 +62,11 @@ function currentState() {
     stats: config.accountType === "personal" ? { ...stats, failed: P.failed } : stats,
     folders: config.accountType === "personal" ? [] : folderStatuses(),
     privateDocsEnabled,
-    accountType: config.accountType || "shop",
+    // "personal" or "shop" — or null while it isn't known yet (signed out, or a
+    // config saved before account types existed and not yet checked with the
+    // server). The window keeps its wording neutral until it's known, so a
+    // Personal account never sees shop (parts-invoice) wording, even briefly.
+    accountType: knownAccountType(),
     // Honest Archive Personal only: what's waiting, what failed, and whether the
     // server can be reached — the window shows an attention state from these.
     personal: config.accountType === "personal" ? {
@@ -79,6 +83,45 @@ function currentState() {
       problem: P.trouble || P.failed ? personalProblem(true) : null,
     } : null,
   };
+}
+
+function knownAccountType() {
+  const t = config.accountType;
+  return t === "personal" || t === "shop" ? t : null;
+}
+
+/**
+ * A config saved before account types existed has a sign-in but no type. Ask the
+ * server which it is (the Personal check-in answers only for Personal accounts)
+ * and remember it. Until it's known the window stays neutral; uploads keep the
+ * old (shop) behaviour, exactly as before, if the server can't be asked.
+ * Returns the type, or null if it couldn't be decided this time.
+ */
+let accountTypeCheck = null;
+async function resolveAccountType() {
+  if (knownAccountType() || !config.ingestToken) return knownAccountType();
+  if (accountTypeCheck) return accountTypeCheck;
+  accountTypeCheck = (async () => {
+    let type = null;
+    try {
+      const res = await fetch(apiBaseUrl() + "/api/v1/personal/scanner/ping", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + config.ingestToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ version: appVersion() }),
+        signal: AbortSignal.timeout(PING_TIMEOUT_MS),
+      });
+      const body = await res.json().catch(() => null);
+      if (res.ok && body && body.ok === true) type = "personal";
+      else if (res.status === 404 && body && /isn't an Honest Archive Personal account/i.test(String(body.detail || ""))) type = "shop";
+    } catch {}
+    if (type && !knownAccountType()) {
+      config.accountType = type;
+      saveConfig(config);
+      pushState();
+    }
+    return knownAccountType();
+  })();
+  try { return await accountTypeCheck; } finally { accountTypeCheck = null; }
 }
 
 /** What the window's header calls the account. Personal: the archive's own name
@@ -126,7 +169,9 @@ function folderStatuses() {
 }
 
 async function refreshCategories() {
-  if (!config.ingestToken || config.accountType === "personal") return;
+  if (!config.ingestToken) return;
+  if (!knownAccountType()) await resolveAccountType();
+  if (config.accountType === "personal") return;
   const base = (config.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
   try {
     const res = await fetch(base + "/api/v1/invoices/scan-categories", {
@@ -1474,9 +1519,9 @@ ipcMain.handle("logout", () => {
 
 ipcMain.handle("pick-folder", async () => {
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: config.accountType === "personal"
-      ? "Choose the folder your scanner saves to"
-      : "Choose the folder to watch for invoices",
+    title: knownAccountType() === "shop"
+      ? "Choose the folder to watch for invoices"
+      : "Choose the folder your scanner saves to",
     properties: ["openDirectory", "createDirectory"],
     defaultPath: config.watchDir || app.getPath("documents"),
   });
@@ -1655,8 +1700,14 @@ if (!gotLock) {
     config = loadConfig();
     createWindow();
     createTray();
-    // Resume watching automatically if it was configured before.
-    if (config.ingestToken && config.watchDir) startWatching();
+    // Resume watching automatically if it was configured before — once the
+    // account type is known (an old config is checked with the server first;
+    // if it can't be reached, watching starts the way it always did).
+    if (config.ingestToken && config.watchDir) {
+      resolveAccountType().finally(() => startWatching());
+    } else if (config.ingestToken) {
+      resolveAccountType();
+    }
     // Honest Archive Personal check-ins (every 5 minutes, and soon after uploads).
     setInterval(personalTick, 5000);
     app.on("activate", () => {

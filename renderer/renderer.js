@@ -27,10 +27,14 @@ function renderFolders(state) {
   const list = $("folderStatus");
   if (!wrap || !list) return;
   const folders = state.folders || [];
+  // Each account's help shows only once its type is known (accountType is null
+  // until then): a Personal account must never see shop wording, even briefly.
   const personal = state.accountType === "personal";
+  const shop = state.accountType === "shop";
   if ($("personalHelp")) $("personalHelp").hidden = !personal;
-  if ($("shopFolderHelp")) $("shopFolderHelp").hidden = personal;
-  if ($("shopReqs")) $("shopReqs").hidden = personal;
+  if ($("shopFolderHelp")) $("shopFolderHelp").hidden = !shop;
+  if ($("shopReqs")) $("shopReqs").hidden = !shop;
+  if (!shop) { wrap.hidden = true; return; }
   if (!state.watchDir) { wrap.hidden = true; return; }
   wrap.hidden = false;
 
@@ -60,6 +64,9 @@ function escapeHtml(v) {
 }
 
 function render(state) {
+  // "personal", "shop", or null while the account type isn't known yet (then the
+  // wording stays neutral — never the shop's parts-invoice wording).
+  const isShop = state.accountType === "shop";
   // Account area
   const acct = $("account");
   if (state.signedIn) {
@@ -84,7 +91,7 @@ function render(state) {
   // Configure
   $("watchDir").textContent = state.watchDir || "No folder chosen yet";
   $("dirSub").textContent = state.watchDir
-    ? (state.accountType === "personal" ? "Your scanner's folder is set" : "Directory configured for scans")
+    ? (isShop ? "Directory configured for scans" : "Your scanner's folder is set")
     : "Choose the folder your scanner saves to";
 
   renderFolders(state);
@@ -96,7 +103,7 @@ function render(state) {
 
   $("dot").className = "dot " + (state.scanning ? "watching" : "idle");
   $("statusText").textContent = state.scanning
-    ? (state.accountType === "personal" ? "Watching for new scans…" : "Watching for new invoices…")
+    ? (isShop ? "Watching for new invoices…" : "Watching for new scans…")
     : canWatch ? "Idle — press Start" : "Choose a folder to begin";
 
   // Honest Archive Personal: an attention state when pages are stuck.
@@ -156,13 +163,15 @@ function render(state) {
   $("sFailed").textContent = state.stats.failed;
   // Red only when something actually failed (Personal); shops keep their look.
   $("sFailed").classList.toggle("fail",
-    state.accountType === "personal" ? Number(state.stats.failed) > 0 : true);
+    isShop ? true : Number(state.stats.failed) > 0);
   $("sLast").textContent = state.stats.lastUpload || "—";
   const note = $("statsNote");
   if (note) {
     note.textContent = state.accountType === "personal"
       ? "Uploaded counts this session; Failed is what's in the failed folder now. Full history lives in the Honest Archive web app."
-      : "Counts are for this session. Full history lives in the Honest Archive web app.";
+      : isShop
+        ? "Counts are for this session. Full history lives in the Honest Archive web app."
+        : "Full history lives in the Honest Archive web app.";
   }
 }
 

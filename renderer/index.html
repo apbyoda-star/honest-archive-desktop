@@ -23,14 +23,14 @@
     <div class="card">
       <h1>Sign in</h1>
       <p class="muted">Connect this computer to your Honest Archive account.</p>
-      <label>Email</label>
+      <label for="email">Email</label>
       <input id="email" type="email" placeholder="you@example.com" autocomplete="username" />
-      <label>Password</label>
+      <label for="password">Password</label>
       <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
       <details class="advanced">
         <summary>Advanced — server address</summary>
-        <label>Backend URL</label>
-        <input id="apiBase" type="text" />
+        <label for="apiBase">Server address</label>
+        <input id="apiBase" type="text" spellcheck="false" autocomplete="off" />
       </details>
       <p id="loginError" class="error hidden"></p>
       <button id="loginBtn" class="primary">Sign in</button>
@@ -53,7 +53,7 @@
         <div class="dir-main">
           <span class="dir-label">Scan Directory</span>
           <span id="watchDir" class="dir-path">No folder chosen yet</span>
-          <span id="dirSub" class="dir-sub">Choose the folder your scanner saves to — subfolders inside it file by category</span>
+          <span id="dirSub" class="dir-sub">Choose the folder your scanner saves to</span>
         </div>
         <button id="pickBtn" class="ghost">Browse…</button>
       </div>
@@ -79,7 +79,7 @@
       <!-- Status / start-stop -->
       <div class="statusbar">
         <span id="dot" class="dot idle"></span>
-        <span id="statusText">Idle</span>
+        <span id="statusText"></span>
         <div class="spacer"></div>
         <button id="retryBtn" class="ghost" type="button" hidden>Retry failed scans</button>
         <button id="toggleBtn" class="primary" disabled>Start watching</button>
@@ -112,7 +112,9 @@
         <p class="muted help-note">You can drop in PDF, JPG, PNG and TIFF files too. iPhone photos (.HEIC) can't be read yet — save them as JPG or PDF first.</p>
       </div>
 
-      <div class="reqs" id="shopFolderHelp">
+      <!-- Shop-only (parts invoices). Hidden until the account type is known, so a
+           Personal account never sees this wording, not even for a moment. -->
+      <div class="reqs" id="shopFolderHelp" hidden>
         <h3>Filing with folders</h3>
         <ol>
           <li>Scans dropped <b>loose</b> in this folder are filed as ordinary parts invoices.</li>
@@ -132,7 +134,7 @@
       </div>
 
       <!-- Requirements (mirrors the familiar scan-client copy) -->
-      <div class="reqs" id="shopReqs">
+      <div class="reqs" id="shopReqs" hidden>
         <h3>Scan file requirements</h3>
         <ol>
           <li>Supported formats: JPEG, PNG, BMP, PDF and TIFF.</li>
@@ -155,7 +157,7 @@
         <div class="stat"><span class="stat-num fail" id="sFailed">0</span><span class="stat-label">Failed</span></div>
         <div class="stat wide"><span class="stat-num small" id="sLast">—</span><span class="stat-label">Last upload</span></div>
       </div>
-      <p class="muted small" id="statsNote">Counts are for this session. Full history lives in the Honest Archive web app.</p>
+      <p class="muted small" id="statsNote">Full history lives in the Honest Archive web app.</p>
     </div>
   </section>
 

@@ -9,6 +9,7 @@ const Module = require("module");
 const path = require("path");
 const userData = path.resolve(process.argv[2] || path.join(__dirname, ".userdata"));
 const noop = () => {};
+let lastPushedType; // the window's account type, logged whenever it changes
 const handlers = {};
 const pkgVersion = require(path.join(__dirname, "..", "package.json")).version;
 class Stub { constructor() {} on() { return this; } loadFile() { return Promise.resolve(); } show() {} hide() {} focus() {} setToolTip() {} setContextMenu() {} isVisible() { return false; } isDestroyed() { return false; } setMenu() {} setMenuBarVisibility() {} }
@@ -20,7 +21,7 @@ const electron = {
     on: noop, quit: () => process.exit(0), isQuitting: false,
     setLoginItemSettings: noop, getVersion: () => pkgVersion, dock: { hide: noop, show: noop },
   },
-  BrowserWindow: class extends Stub { constructor() { super(); this.webContents = { send: (ch, p) => { if (ch === "status") console.log(`[${p.time}] ${p.level}: ${p.line}`); }, on: noop, setWindowOpenHandler: noop }; } static getAllWindows() { return []; } },
+  BrowserWindow: class extends Stub { constructor() { super(); this.webContents = { send: (ch, p) => { if (ch === "status") console.log(`[${p.time}] ${p.level}: ${p.line}`); else if (ch === "state" && p.accountType !== lastPushedType) { lastPushedType = p.accountType; console.log(`[headless] window state: accountType=${p.accountType}`); } }, on: (ev, fn) => { if (ev === "did-finish-load") setImmediate(fn); }, setWindowOpenHandler: noop }; } static getAllWindows() { return []; } },
   Tray: Stub,
   Menu: { buildFromTemplate: () => ({}) , setApplicationMenu: noop },
   ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; }, on: noop },
@@ -45,7 +46,7 @@ process.stdin.on("data", async (chunk) => {
     if (!handlers[name]) { origLog("[headless] no handler", name); continue; }
     try {
       const r = await handlers[name]({}, arg);
-      const brief = (x) => (x && x.personal !== undefined ? { scanning: x.scanning, apiBase: x.apiBase, personal: x.personal, stats: x.stats } : x);
+      const brief = (x) => (x && x.personal !== undefined ? { accountType: x.accountType, scanning: x.scanning, apiBase: x.apiBase, personal: x.personal, stats: x.stats } : x);
       origLog(`[headless] ${name} ->`, JSON.stringify(r && r.state ? { ok: r.ok, message: r.message, state: brief(r.state) } : brief(r)));
     } catch (e) { origLog(`[headless] ${ch} failed:`, e.message); }
   }
