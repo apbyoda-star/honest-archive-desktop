@@ -309,6 +309,7 @@ const AUTO_RETRY_MS = 60 * 60 * 1000;
 const BACKOFF_MS = [30e3, 60e3, 120e3, 240e3, 480e3, 600e3];
 const UPLOAD_TIMEOUT_MS = 120000;
 const PING_TIMEOUT_MS = 15000;
+const ADDRESS_RETRY_MS = 10 * 60 * 1000;
 
 const P = {
   seen: new Map(),        // full path -> {size, mtime, since} (since: first look at this size+mtime)
@@ -328,6 +329,7 @@ const P = {
   lastPing: 0,
   pingAt: 0,              // a ping is due at this time (after uploads/failures)
   lastAutoRetry: 0,
+  lastAddressRetry: 0,    // when address-failed pages were last sent again after the address answered
 };
 
 function batchKeyFor(name) {
@@ -686,30 +688,55 @@ function recordRejected(root, label, files, reason, kind, detail) {
     }
   }
   writeRecord(errPath, { headline: noteHeadline(reason, kind, allFiles.length), files: allFiles,
-                         sizes: allSizes, kind, details });
+                         sizes: allSizes, kind, details,
+                         // Which address refused them: once a different one (or this
+                         // one, later) answers as Honest Archive, they're sent again.
+                         address: kind === "address" ? apiBaseUrl() : "" });
   stats.failed += moved.length;
   P.lastReject = reason;
 }
 
-/** Write a failed/ note. */
-function writeRecord(errPath, { headline, when, files, sizes, kind, details }) {
+/** "Nov 6, 2026, 10:02 AM" — when a note was written, in words a person reads. */
+function noteWhen() {
+  return new Date().toLocaleString("en-US", {
+    month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+/**
+ * Write a failed/ note. The top is for the person who opens it (what happened,
+ * which papers, what to do); the Scan Client's own bookkeeping (file list, kind,
+ * sizes, the server's exact words) sits under a final "For support:" heading.
+ * Every field is still a "Name: value" line, so notes written by older versions
+ * (bookkeeping at the top) keep working.
+ */
+function writeRecord(errPath, { headline, when, files, sizes, kind, details, address }) {
+  const which = describeFailedPages(files);
+  const n = files.length;
   try {
     fs.writeFileSync(errPath, [
       "Couldn't send: " + headline,
-      "When: " + (when || new Date().toLocaleString()),
-      "Files: " + files.join(", "),
-      "Kind: " + kind,
-      "Retryable: " + (notRetryable(kind) ? "no" : "yes"),
-      ...(sizes && sizes.length ? ["Sizes: " + sizes.join(", ")] : []),
-      ...(details && details.length ? ["Honest Archive said: " + details.join("; ")] : []),
+      "When: " + (when || noteWhen()),
+      ...(which ? [(files.every((f) => !batchKeyFor(originalName(f)))
+        ? (n === 1 ? "Which file: " : "Which files: ")
+        : (n === 1 ? "Which page: " : "Which pages: ")) + which.text] : []),
       "",
-      kind === "unreadable"
+      "What to do: " + (kind === "unreadable"
         ? "Retrying won't help — Honest Archive can't use this file. Scan the paper again, then press “Clear these” in the Scan Client (or delete the file here)."
         : kind === "unsupported"
           ? "Honest Archive can't read this kind of file yet. Save it as JPG or PDF and put that copy in the scanner folder, then press “Clear these” in the Scan Client (or delete the file here)."
           : kind === "address"
-            ? "Fix the server address in the Scan Client window (press “Change address”). These pages are sent again automatically once it's right."
-            : "Fix the file (or scan it again) and press “Retry failed scans” in the Scan Client.",
+            ? `Fix the server address in the Scan Client window (press “Change address”, then “Save and check”). ${n === 1 ? "This page is" : "These pages are"} sent again by ${n === 1 ? "itself" : "themselves"} as soon as Honest Archive answers at the right address — you don't need to scan anything again.`
+            : "Fix the file (or scan it again) and press “Retry failed scans” in the Scan Client."),
+      "",
+      "",
+      "For support: (the Scan Client reads the lines below — please leave them as they are)",
+      "Files: " + files.join(", "),
+      "Kind: " + kind,
+      "Retryable: " + (notRetryable(kind) ? "no" : "yes"),
+      ...(address ? ["Server address: " + address] : []),
+      ...(sizes && sizes.length ? ["Sizes: " + sizes.join(", ")] : []),
+      ...(details && details.length ? ["Honest Archive said: " + details.join("; ")] : []),
       "",
     ].join("\n"));
   } catch {}
@@ -800,8 +827,10 @@ function failedRecords(root) {
         if (m) sizes.set(m[1], { size: +m[2], mtime: +m[3] });
       }
     }
+    const addrLine = /^Server address: (.*)$/m.exec(text);
     out.push({ record: path.join(failedDir, n), files, network, retryable, kind, sizes,
-               reason: reasonLine ? reasonLine[1].trim() : "" });
+               reason: reasonLine ? reasonLine[1].trim() : "",
+               address: addrLine ? addrLine[1].trim() : "" });
   }
   return out;
 }
@@ -852,6 +881,38 @@ function retryFailed(root, which) {
     if (P.block) P.block.nextAt = 0;
   }
   return moved;
+}
+
+/**
+ * The current server address just answered as Honest Archive (a sign-in, a
+ * check-in Honest Archive acknowledged, an upload it took). Every page waiting in
+ * failed/ because of the server address is then stale — the address that refused
+ * them has been fixed, however it was fixed (Change address, signing in again,
+ * an edited config, a restart) — so move them back and send them.
+ * Pages that were refused at THIS very address (it answers check-ins but not
+ * uploads — rare) are tried again at most every ADDRESS_RETRY_MS, never in a loop.
+ * Personal accounts only. Returns how many pages went back.
+ */
+function addressConfirmed(how) {
+  if (config.accountType !== "personal" || !config.watchDir) return 0;
+  const root = config.watchDir;
+  const current = apiBaseUrl();
+  const records = failedRecords(root).filter((r) => r.kind === "address");
+  if (!records.length) return 0;
+  const now = Date.now();
+  const sameAddressOnly = records.every((r) => r.address && r.address === current);
+  if (sameAddressOnly && now - P.lastAddressRetry < ADDRESS_RETRY_MS) return 0;
+  P.lastAddressRetry = now;
+  const n = retryFailed(root, "address");
+  refreshFailedCounts(root);
+  P.waiting = personalInbox(root).length;
+  if (n) {
+    log(`Honest Archive answered at ${current}${how ? ` (${how})` : ""} — sending ${plural(n, "page")} again that ${n === 1 ? "was" : "were"} waiting on the server address.`, "ok");
+    if (!scanning) log("Press Start watching to send them.", "info");
+    pingSoon();
+  }
+  pushState();
+  return n;
 }
 
 /** What's wrong, in plain words. The website puts its own "N pages couldn't be
@@ -957,6 +1018,9 @@ function pingBody() {
     waiting: P.waiting,
     failed: P.failed,
     retryable: P.failed > 0 ? P.retryable > 0 : null,
+    // ...of which are waiting on a wrong server address: the website gives
+    // "Change address" steps for these, never "press Retry failed scans".
+    address_failed: P.addressFailed,
     message: personalProblem(),
   });
 }
@@ -969,17 +1033,24 @@ async function pingPersonal() {
     P.waiting = personalInbox(config.watchDir).length;
     refreshFailedCounts(config.watchDir);
   }
+  let answered = false;
   try {
-    await personalFetch("/api/v1/personal/scanner/ping", {
+    const res = await personalFetch("/api/v1/personal/scanner/ping", {
       method: "POST",
       headers: { Authorization: "Bearer " + config.ingestToken, "Content-Type": "application/json" },
       body: pingBody(),
     }, PING_TIMEOUT_MS);
     // The server answered, so if we were waiting out a "can't reach", try now.
     if (P.block && P.block.kind === "offline") P.block.nextAt = 0;
+    // Only Honest Archive answers a check-in with {ok: true} (a website that
+    // answers every address with a page doesn't).
+    const body = await res.json().catch(() => null);
+    answered = Boolean(body && body.ok === true);
   } catch {
     // A missed check-in is what tells the website the computer is offline.
   }
+  // The address works: pages that failed because of the address go again.
+  if (answered) addressConfirmed();
 }
 
 function pingSoon() {
@@ -1123,6 +1194,7 @@ async function scanPersonal(root) {
   }
 
   const blocked = P.block && now < P.block.nextAt;
+  let answered = false;   // Honest Archive took an upload at the current address
   if (!blocked) {
     const order = [...groups.values()].sort(
       (a, b) => Math.min(...a.files.map((f) => f.mtime)) - Math.min(...b.files.map((f) => f.mtime)));
@@ -1204,6 +1276,7 @@ async function scanPersonal(root) {
         // with their reason; everything else it took.
         P.block = null;
         P.groupBackoff.delete(g.key);
+        if (reply && (reply.batch_id != null || reply.status)) answered = true;
         const skipped = new Map();
         for (const sk of (reply && Array.isArray(reply.skipped) ? reply.skipped : [])) {
           if (sk && sk.name) skipped.set(String(sk.name), String(sk.reason || ""));
@@ -1251,6 +1324,8 @@ async function scanPersonal(root) {
       }
     }
   }
+  // The address works: pages that failed because of the address go again.
+  if (answered) addressConfirmed();
 
   // A feed that's all sent and hasn't grown for a minute is complete on the server.
   for (const [key, feed] of P.feeds) {
@@ -1537,6 +1612,16 @@ ipcMain.handle("login", async (_e, { apiBase, email, password }) => {
   config.email = email;
   saveConfig(config);
   log("Signed in as " + email + (r.shopName ? " (" + r.shopName + ")" : ""), "ok");
+  if (config.accountType === "personal") {
+    // Signed in at this address, so it's Honest Archive: whatever was blocking
+    // uploads (a refused sign-in, an unreachable address) is over, and pages that
+    // failed because of the server address are sent again.
+    P.block = null;
+    P.groupBackoff.clear();
+    P.trouble = null;
+    P.lastAddressRetry = 0;
+    addressConfirmed("signed in");
+  }
   pushState();
   return currentState();
 });
