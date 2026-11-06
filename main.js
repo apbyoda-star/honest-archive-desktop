@@ -287,7 +287,7 @@ async function apiLogin(apiBase, email, password) {
 // Files only ever move to failed/ when Honest Archive looked at them and said no
 // (a damaged file, too big). If the server can't be reached, or has a hiccup, the
 // pages stay exactly where the scanner put them and are tried again later.
-const BROTHER_RE = /^(.+?)_(\d{3,4})\.(pdf|jpe?g|png|tiff?|bmp)$/i;
+const BROTHER_RE = /^(.+?)[_-](\d{3,6})\.(pdf|jpe?g|png|tiff?|bmp)$/i;
 const PAGES_PER_REQUEST = 25;
 // A page is ready once its size AND modified time have both stayed the same for
 // this long (a Wi-Fi / network-folder scan can pause for a few seconds mid-write)
