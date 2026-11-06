@@ -69,6 +69,9 @@ function currentState() {
       waiting: P.waiting,
       failed: P.failed,
       retryable: P.retryable,
+      // ...of which are waiting on a wrong server address: "Retry" can't help
+      // those (same address, same failure) — "Change address" can.
+      addressFailed: P.addressFailed,
       trouble: P.trouble,
       problem: P.trouble || P.failed ? personalProblem(true) : null,
     } : null,
@@ -222,7 +225,8 @@ const P = {
   lastReject: "",         // plain-words reason for the newest file moved to failed/
   waiting: 0,
   failed: 0,              // unique pages in failed/
-  retryable: 0,           // ...of which "Retry failed scans" can usefully send again
+  retryable: 0,           // ...of which aren't unreadable (the website's "retry can help")
+  addressFailed: 0,       // ...of which failed because of the server address (fixed by Change, not Retry)
   oneByOne: new Set(),    // feed keys whose pages go up singly (a multi-page request was refused whole)
   finished: new Set(),    // feed keys already reported as sent this session (more pages = "the rest of")
   addressLogged: new Set(),// feed keys already reported as failing because of the server address
@@ -324,6 +328,13 @@ const ADDRESS_WRONG = "Honest Archive didn't recognize this upload — the serve
 // The same problem as the website shows it (the person reading it isn't at the
 // scanner computer, so "above" means nothing there).
 const ADDRESS_WRONG_SITE = "The server address on the scanner computer looks wrong — fix it in the Scan Client there (Change, next to the address).";
+// ...and as the headline of the .error.txt note in failed/ (a text file has no "above").
+const ADDRESS_WRONG_FILE = "Honest Archive didn't recognize this upload — the server address in the Scan Client looks wrong.";
+
+/** The "Couldn't send:" headline written into a failed/ note. */
+function noteHeadline(reason, kind, n) {
+  return kind === "address" ? ADDRESS_WRONG_FILE : pluralReason(reason, n);
+}
 
 function plainSkipReason(serverReason) {
   return /MB|too big|too large/i.test(serverReason || "") ? TOO_BIG : NOT_READABLE;
@@ -431,15 +442,22 @@ function originalName(name) {
   return name.replace(/_\d{13}(\.[^.]+)$/, "$1");
 }
 
-/** Pages in failed/, each counted once, and how many of them a retry can help. */
+/** Pages in failed/, each counted once, how many of them aren't unreadable, and
+ *  how many of those are waiting on the server address. */
 function refreshFailedCounts(root) {
   const names = failedFiles(root);
   const stuck = new Set();
-  for (const r of failedRecords(root)) if (!r.retryable) r.files.forEach((f) => stuck.add(f));
+  const address = new Set();
+  for (const r of failedRecords(root)) {
+    if (!r.retryable) r.files.forEach((f) => stuck.add(f));
+    else if (r.kind === "address") r.files.forEach((f) => address.add(f));
+  }
   const all = new Set(names.map(originalName));
   const retry = new Set(names.filter((n) => !stuck.has(n)).map(originalName));
+  const addr = new Set(names.filter((n) => !stuck.has(n) && address.has(n)).map(originalName));
   P.failed = all.size;
   P.retryable = retry.size;
+  P.addressFailed = addr.size;
 }
 
 function backoffMs(attempts) {
@@ -495,7 +513,9 @@ function recordRejected(root, label, files, reason, kind, detail) {
     const pr = /^Couldn't send: (.*)$/m.exec(prev);
     const pf = /^Files: (.*)$/m.exec(prev);
     const pd = /^Honest Archive said: (.*)$/m.exec(prev);
-    if (pk && pk[1] === kind && pr && [reason, pluralReason(reason, 2)].includes(pr[1].trim()) && pf) {
+    const sameReason = pr && [reason, pluralReason(reason, 2), noteHeadline(reason, kind, 1), noteHeadline(reason, kind, 2)]
+      .includes(pr[1].trim());
+    if (pk && pk[1] === kind && sameReason && pf) {
       const old = pf[1].split(",").map((x) => x.trim()).filter(Boolean);
       allFiles = [...old, ...moved.filter((m) => !old.includes(m))];
       if (pd && pd[1].trim() && !details.includes(pd[1].trim())) details = [pd[1].trim(), ...details];
@@ -505,7 +525,7 @@ function recordRejected(root, label, files, reason, kind, detail) {
   }
   try {
     fs.writeFileSync(errPath, [
-      "Couldn't send: " + pluralReason(reason, allFiles.length),
+      "Couldn't send: " + noteHeadline(reason, kind, allFiles.length),
       "When: " + new Date().toLocaleString(),
       "Files: " + allFiles.join(", "),
       "Kind: " + kind,
@@ -577,8 +597,10 @@ function retryFailed(root, which) {
       if (which === "network" ? r.network : r.kind === "address") r.files.forEach((f) => wanted.add(f));
     }
   } else {
+    // Pages waiting on the server address stay too: sent to the same address
+    // they'd just fail again. Fixing the address (Save and check) sends them.
     const stuck = new Set();
-    for (const r of records) if (!r.retryable) r.files.forEach((f) => stuck.add(f));
+    for (const r of records) if (!r.retryable || r.kind === "address") r.files.forEach((f) => stuck.add(f));
     wanted = new Set(failedFiles(root).filter((n) => !stuck.has(n)));
   }
   let moved = 0;
@@ -628,10 +650,13 @@ function personalProblem(withCount) {
         if (!r.retryable || !r.reason) continue;
         try {
           const t = fs.statSync(r.record).mtimeMs;
-          if (!newest || t > newest.t) newest = { t, reason: r.reason };
+          if (!newest || t > newest.t) newest = { t, reason: r.reason, kind: r.kind };
         } catch {}
       }
       retryReason = newest ? newest.reason : (P.lastReject || "");
+      // The note's headline is written for a text file; the window and the
+      // website each have their own wording for a wrong address.
+      if ((newest && newest.kind === "address") || retryReason === ADDRESS_WRONG_FILE) retryReason = ADDRESS_WRONG;
       if (!retryReason) retryReason = "Press “Retry failed scans” on the scanner computer.";
       if (retryReason === ADDRESS_WRONG && !withCount) retryReason = ADDRESS_WRONG_SITE;
     }
@@ -1362,11 +1387,14 @@ ipcMain.handle("retry-failed", () => {
   refreshFailedCounts(config.watchDir);
   if (n) {
     log(`Moved ${plural(n, "page")} back — sending ${n === 1 ? "it" : "them"} again.`, "ok");
+  } else if (P.addressFailed > 0) {
+    log(`Nothing to retry yet — ${plural(P.addressFailed, "page")} ${P.addressFailed === 1 ? "is" : "are"} waiting on the server address. `
+      + "Press “Change address”, fix it and press “Save and check”; they're sent again as soon as it's right.", "info");
   } else if (P.failed > 0) {
     log((P.failed === 1
       ? "Nothing to retry. " + NOT_READABLE
       : `Nothing to retry. ${plural(P.failed, "page")} can't be read — scan them again.`)
-      + " Once they're scanned again, press “Clear these”.", "info");
+      + ` Once ${P.failed === 1 ? "it's" : "they're"} scanned again, press “Clear these”.`, "info");
   } else {
     log("There was nothing to retry.", "info");
   }

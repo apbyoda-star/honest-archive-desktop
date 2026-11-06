@@ -103,15 +103,26 @@ function render(state) {
   const p = state.personal;
   const retry = $("retryBtn");
   // Only when a retry can help: a page Honest Archive couldn't read would just
-  // fail again, so it doesn't get a button that loops.
-  if (retry) retry.hidden = !(p && p.retryable > 0);
+  // fail again, and so would a page sent to the same wrong server address — those
+  // get "Change address" instead (fixing it sends them again by itself).
+  const addressFailed = p ? (p.addressFailed || 0) : 0;
+  if (retry) retry.hidden = !(p && p.retryable - addressFailed > 0);
   const fa = $("failedActions");
   if (fa) {
     const unreadable = p ? p.failed - p.retryable : 0;
     fa.hidden = !(p && p.failed > 0);
     $("clearFailedBtn").hidden = !(unreadable > 0);
-    $("failedHint").textContent = unreadable > 0
-      ? "Once you've scanned those papers again, press “Clear these” — they're moved to failed/cleared, nothing is deleted."
+    const ca = $("changeAddrBtn");
+    if (ca) ca.hidden = !(addressFailed > 0 && state.accountType === "personal");
+    const hints = [];
+    if (addressFailed > 0) {
+      hints.push(`${addressFailed === 1 ? "1 page is" : addressFailed + " pages are"} waiting on the server address — press “Change address”, fix it and press “Save and check”; they're sent again as soon as it's right.`);
+    }
+    if (unreadable > 0) {
+      hints.push("Once you've scanned the unreadable papers again, press “Clear these” — they're moved to failed/cleared, nothing is deleted.");
+    }
+    $("failedHint").textContent = hints.length
+      ? hints.join(" ")
       : "The pages that couldn't be sent are in the “failed” folder.";
   }
   if (p && state.scanning) {
@@ -134,6 +145,9 @@ function render(state) {
   // Stats
   $("sUploaded").textContent = state.stats.uploaded;
   $("sFailed").textContent = state.stats.failed;
+  // Red only when something actually failed (Personal); shops keep their look.
+  $("sFailed").classList.toggle("fail",
+    state.accountType === "personal" ? Number(state.stats.failed) > 0 : true);
   $("sLast").textContent = state.stats.lastUpload || "—";
   const note = $("statsNote");
   if (note) {
@@ -233,6 +247,14 @@ $("clearFailedBtn").onclick = async () => {
   const btn = $("clearFailedBtn");
   btn.disabled = true;
   try { render(await window.ha.clearFailed()); } finally { btn.disabled = false; }
+};
+// Failed pages waiting on a wrong address: open the address editor (it's what
+// the failed pages need) and bring it into view.
+$("changeAddrBtn").onclick = () => {
+  serverMsg("");
+  serverEditing(true);
+  const card = $("serverCard");
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
 };
 $("openFailedBtn").onclick = async () => render(await window.ha.openFailedFolder());
 $("toggleBtn").onclick = async () => {
